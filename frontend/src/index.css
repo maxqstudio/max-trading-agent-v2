@@ -1,0 +1,52 @@
+@import "tailwindcss";
+
+:root {
+  --bg-canvas: #070b12;
+  --bg-sidebar: #0a101b;
+  --bg-card: #0e1522;
+  --bg-sub: #121b2b;
+  --border-hairline: #1f2d45;
+  --text-main: #e6edf7;
+  --text-muted: #8a9bb5;
+  --accent-primary: #3b82f6;
+  --accent-bull: #10b981;
+  --accent-bear: #ef4444;
+  --accent-evo: #8b5cf6;
+  --accent-neural: #06b6d4;
+  --accent-warn: #f59e0b;
+}
+
+body {
+  background-color: var(--bg-canvas);
+  color: var(--text-main);
+  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+.mono {
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.cockpit-card {
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-hairline);
+}
+
+.cockpit-sub {
+  background-color: var(--bg-sub);
+  border: 1px solid var(--border-hairline);
+}
+
+@keyframes pulseRing {
+  0% { transform: scale(0.92); opacity: 0.9; }
+  50% { transform: scale(1.3); opacity: 0.25; }
+  100% { transform: scale(0.92); opacity: 0.9; }
+}
+
+.live-pulse {
+  animation: pulseRing 1.4s ease-in-out infinite;
+}
+
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #1f2d45; border-radius: 999px; }

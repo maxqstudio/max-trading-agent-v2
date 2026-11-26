@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/main.tsx","./src/api/client.ts","./src/components/brainview.tsx","./src/components/equitycurvecanvas.tsx","./src/components/evolutionview.tsx","./src/components/forensicsview.tsx","./src/components/killswitchmodal.tsx","./src/components/livecandlechart.tsx","./src/components/riskconfigview.tsx","./src/types/trading.ts"],"version":"5.9.3"}

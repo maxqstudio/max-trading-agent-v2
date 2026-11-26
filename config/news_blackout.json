@@ -1,0 +1,23 @@
+{
+  "description": "High-impact scheduled macroeconomic blackout events (UTC ISO-8601). Add or update weekly from economic calendar.",
+  "events": [
+    {
+      "title": "US Non-Farm Payrolls (NFP)",
+      "currencies": ["USD", "XAU"],
+      "timestamp_utc": "2026-12-04T13:30:00Z",
+      "impact": "HIGH"
+    },
+    {
+      "title": "US CPI Inflation Release",
+      "currencies": ["USD", "XAU"],
+      "timestamp_utc": "2026-12-10T13:30:00Z",
+      "impact": "HIGH"
+    },
+    {
+      "title": "FOMC Rate Decision & Statement",
+      "currencies": ["USD", "XAU"],
+      "timestamp_utc": "2026-12-16T19:00:00Z",
+      "impact": "HIGH"
+    }
+  ]
+}

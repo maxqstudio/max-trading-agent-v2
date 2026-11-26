@@ -1,0 +1,104 @@
+app:
+  name: "Max Trading Agent v2"
+  version: "v1.0"
+  trading_mode: "MT5_DEMO" # SIMULATOR | SHADOW_ONLY | MT5_DEMO | MT5_LIVE
+  auto_promote_challenger: false
+  database_path: "data/max_agent.db"
+  snapshots_dir: "data/snapshots"
+  host: "127.0.0.1"
+  port: 8765
+
+instruments:
+  symbols:
+    - "XAUUSD"
+    - "EURUSD"
+    - "GBPUSD"
+    - "USDJPY"
+  symbol_suffix: ""
+  primary_timeframe: "M1"
+  confirm_timeframe: "M5"
+  order_ttl_ms: 1500
+  magic_number: 202602
+
+risk:
+  risk_per_trade_pct: 0.50
+  min_risk_pct: 0.20
+  max_risk_pct: 1.00
+  half_kelly_enabled: true
+  max_daily_drawdown_pct: 3.00
+  max_concurrent_positions: 3
+  max_usd_correlated_positions: 2
+  max_spread_atr_ratio: 0.30
+  consecutive_loss_limit: 3
+  consecutive_loss_cooldown_min: 15
+  min_rr_ratio: 1.25
+
+shields:
+  rollover_blackout_enabled: true
+  rollover_start_utc: "21:50"
+  rollover_end_utc: "23:10"
+  news_blackout_enabled: true
+  news_file: "config/news_blackout.json"
+  news_buffer_minutes: 15
+  spread_anomaly_multiplier: 2.5
+  shock_bar_atr_multiplier: 3.0
+  shock_cooldown_minutes: 10
+  friday_flatten_enabled: true
+  friday_flatten_utc: "20:45"
+  preferred_sessions_only: false # If true, restricts aggressive entries to London/NY windows
+
+ai:
+  dl_seq_len: 32
+  dl_min_train_samples: 120
+  dl_epochs: 18
+  dl_lr: 0.008
+  ml_min_probability: 0.56
+  ml_min_train_samples: 80
+  bandit_forgetting_factor: 0.985
+  rl_exit_enabled: true
+  rl_exit_be_trigger_r: 0.80
+  rl_exit_trail_trigger_r: 1.25
+  rl_exit_partial_trigger_r: 1.50
+
+strategies:
+  liquidity_sweep:
+    enabled: true
+    lookback_bars: 16
+    min_wick_ratio: 0.55
+    sl_atr_mult: 1.45
+    tp_atr_mult: 2.20
+  micro_breakout:
+    enabled: true
+    squeeze_window: 14
+    breakout_window: 10
+    min_body_atr: 0.45
+    sl_atr_mult: 1.35
+    tp_atr_mult: 2.40
+  ema_vwap_pullback:
+    enabled: true
+    fast_ema: 9
+    slow_ema: 21
+    min_adx: 20.0
+    rsi_low: 38.0
+    rsi_high: 62.0
+    sl_atr_mult: 1.30
+    tp_atr_mult: 2.10
+  tick_imbalance:
+    enabled: true
+    consecutive_bars: 3
+    min_momentum_atr: 0.55
+    sl_atr_mult: 1.25
+    tp_atr_mult: 2.00
+
+evolution:
+  schedule_interval_minutes: 240
+  min_bars_for_wfo: 220
+  oos_min_trades: 20
+  oos_min_profit_factor: 1.20
+  oos_max_drawdown_pct: 3.00
+  monte_carlo_iterations: 1000
+  monte_carlo_p95_max_dd_pct: 4.50
+  shadow_min_trades: 15
+  rollback_live_dd_pct: 1.50
+  rollback_min_trades: 8
+  wfo_trials: 12

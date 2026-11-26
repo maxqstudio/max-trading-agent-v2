@@ -1,0 +1,909 @@
+from __future__ import annotations
+
+import asyncio
+import time
+from collections import deque
+from dataclasses import dataclass
+from typing import Any
+
+from backend.bridge.state_machine import IdempotentOrderStateMachine
+from backend.core.config import EnvSettings, TradingConfig
+from backend.core.models import (
+    AccountState,
+    Bar,
+    BridgeSyncRequest,
+    BridgeSyncResponse,
+    DecisionEvent,
+    DLPrediction,
+    LivePosition,
+    MarketRegime,
+    MQLHardGuardTelemetry,
+    OrderAction,
+    OrderCommand,
+    RLExitAction,
+    Side,
+    SymbolSpec,
+    TickSnapshot,
+    TradeRecord,
+    TradingMode,
+    utc_now_ms,
+)
+from backend.evolution.bandit import ContextualBanditRL
+from backend.evolution.champion_gate import ChampionChallengerGate
+from backend.evolution.llm_reflector import LLMReflectionAnalyst
+from backend.evolution.meta_labeler import CalibratedMetaLabeler
+from backend.evolution.optimizer import PurgedWalkForwardOptimizer
+from backend.evolution.rl_exit_agent import RLExitAgent
+from backend.evolution.sequence_net import SequenceConvNet
+from backend.features.dataset import build_sequence_tensor, extract_meta_features
+from backend.features.regime import classify_regime
+from backend.risk.manager import DEFAULT_SPECS, PortfolioRiskManager
+from backend.risk.shields import MarketShields
+from backend.storage.database import Database
+from backend.strategies.registry import StrategySuite
+
+
+@dataclass
+class ShadowPosition:
+    symbol: str
+    strategy_id: str
+    regime: MarketRegime
+    side: Side
+    entry_price: float
+    sl: float
+    tp: float
+    risk_dist: float
+    open_time: int
+    ml_conf: float
+    dl_conf: float
+    spread_pts: float
+    mae_r: float = 0.0
+    mfe_r: float = 0.0
+    version_id: str = "shadow"
+
+
+class TradingOrchestrator:
+    """Central real-time brain uniting MT5 Bridge, 4-Pillar Hybrid AI, Shadow Arena & Evolution Loop."""
+
+    def __init__(
+        self,
+        config: TradingConfig,
+        env: EnvSettings,
+        db: Database,
+    ) -> None:
+        self.config = config
+        self.env = env
+        self.db = db
+
+        # Core state & specs
+        self.specs: dict[str, SymbolSpec] = {
+            s: DEFAULT_SPECS.get(s, DEFAULT_SPECS["XAUUSD"]).model_copy(deep=True)
+            for s in config.instruments.symbols
+        }
+        self.account = AccountState()
+        self.hard_guard = MQLHardGuardTelemetry()
+        self.last_bridge_sync_ms: int = 0
+        self.bridge_latency_ms: float = 0.0
+        self.ticks_per_sec: float = 0.0
+        self._tick_timestamps: deque[int] = deque(maxlen=60)
+        self.scans_count: int = 0
+        self.active_thought: str = "Initializing 4-pillar hybrid AI brain & awaiting live MT5 ticks..."
+
+        # Market buffers & live per-symbol cockpit telemetry
+        self.bars: dict[str, deque[Bar]] = {s: deque(maxlen=600) for s in config.instruments.symbols}
+        self.ticks: dict[str, TickSnapshot] = {}
+        self.regimes: dict[str, MarketRegime] = {s: MarketRegime.RANGING for s in config.instruments.symbols}
+        self.dl_preds: dict[str, DLPrediction] = {s: DLPrediction() for s in config.instruments.symbols}
+        self.readiness: dict[str, int] = {s: 35 for s in config.instruments.symbols}
+        self.buy_pressure: dict[str, int] = {s: 50 for s in config.instruments.symbols}
+        self.shield_status: dict[str, str] = {s: "CLEAR" for s in config.instruments.symbols}
+        self.open_positions: list[LivePosition] = []
+        self.recent_decisions: deque[DecisionEvent] = deque(maxlen=120)
+
+        # Subsystems
+        self.shields = MarketShields(config.shields)
+        self.risk = PortfolioRiskManager(config.risk)
+        self.order_sm = IdempotentOrderStateMachine(order_ttl_ms=config.instruments.order_ttl_ms)
+        self.suite = StrategySuite.from_config(config)
+
+        # 4-Pillar Self-Improving AI
+        self.dl_net = SequenceConvNet()
+        self.ml_labeler = CalibratedMetaLabeler()
+        self.bandit = ContextualBanditRL(forgetting_factor=config.ai.bandit_forgetting_factor)
+        self.rl_exit = RLExitAgent(
+            be_trigger_r=config.ai.rl_exit_be_trigger_r,
+            trail_trigger_r=config.ai.rl_exit_trail_trigger_r,
+        )
+        self.optimizer = PurgedWalkForwardOptimizer()
+        self.reflector = LLMReflectionAnalyst(env)
+        self.gate = ChampionChallengerGate(config, initial_equity=self.account.equity)
+
+        # Parallel Live Shadow Arena
+        self.shadow_positions: dict[str, ShadowPosition] = {}
+        self.shadow_equity: float = 10000.0
+        self.shadow_suite: StrategySuite = StrategySuite.from_config(config)
+
+        # Async callbacks / subscribers (Telegram + WebSocket)
+        self.ws_clients: set[Any] = set()
+        self.alert_callback: Any | None = None
+        self.evolution_running: bool = False
+        self._last_eq_record_ms: int = 0
+
+    async def initialize_from_storage(self) -> None:
+        """Crash recovery & state restoration on startup."""
+        for sym in self.config.instruments.symbols:
+            saved_bars = await self.db.load_recent_bars(sym, "M1", limit=500)
+            if saved_bars:
+                self.bars[sym].extend(saved_bars)
+
+        bandit_kv = await self.db.get_kv("bandit_state")
+        if bandit_kv:
+            self.bandit.load_dict(bandit_kv)
+
+        rl_kv = await self.db.get_kv("rl_exit_state")
+        if rl_kv:
+            self.rl_exit.load_dict(rl_kv)
+
+        snaps = await self.db.list_snapshots()
+        if snaps:
+            self.gate.snapshots = snaps
+            self.apply_active_config(self.gate.active_config)
+        else:
+            await self.db.save_snapshot(self.gate.active_snapshot)
+
+        challs = await self.db.list_challengers(limit=10)
+        if challs:
+            self.gate.challenger_history = challs
+            for c in challs:
+                if c.status in ("SHADOWING", "PENDING_APPROVAL"):
+                    self.gate.active_challenger = c
+                    self.shadow_suite = StrategySuite.from_config(TradingConfig.model_validate(c.config_snapshot))
+                    break
+
+        saved_decs = await self.db.list_decisions(limit=50)
+        for ev in reversed(saved_decs):
+            self.recent_decisions.appendleft(ev)
+
+        dl_path = f"{self.config.app.snapshots_dir}/dl_champion.npz"
+        self.dl_net.load(dl_path)
+
+    def apply_active_config(self, cfg: TradingConfig) -> None:
+        self.config = cfg
+        self.risk.config = cfg.risk
+        self.shields.config = cfg.shields
+        self.suite = StrategySuite.from_config(cfg)
+        self.rl_exit.be_trigger_r = cfg.ai.rl_exit_be_trigger_r
+        self.rl_exit.trail_trigger_r = cfg.ai.rl_exit_trail_trigger_r
+
+    async def _log_decision(self, event: DecisionEvent) -> None:
+        self.recent_decisions.appendleft(event)
+        await self.db.save_decision(event)
+
+    async def _notify(self, text: str) -> None:
+        if self.alert_callback is not None:
+            try:
+                await self.alert_callback(text)
+            except Exception:
+                pass
+
+    async def handle_bridge_sync(self, req: BridgeSyncRequest) -> BridgeSyncResponse:
+        """Primary real-time execution heartbeat called by MQL5 EA or Simulator."""
+        t0 = time.perf_counter()
+        now_ms = utc_now_ms()
+        now_sec = int(now_ms // 1000)
+
+        self.last_bridge_sync_ms = now_ms
+        self._tick_timestamps.append(now_ms)
+        if len(self._tick_timestamps) >= 2:
+            span = max((self._tick_timestamps[-1] - self._tick_timestamps[0]) / 1000.0, 0.25)
+            self.ticks_per_sec = round(len(self._tick_timestamps) / span, 1)
+
+        # 1. Update specs, account, hard guard
+        for sp in req.symbol_specs:
+            self.specs[sp.symbol] = sp
+        self.account = req.account
+        if req.hard_guard is not None:
+            self.hard_guard = req.hard_guard
+
+        # 2. Process order ACKs & reconcile MT5 positions (Single Source of Truth)
+        acks = self.order_sm.process_acks(req.acks)
+        for ack in acks:
+            await self._log_decision(
+                DecisionEvent(
+                    symbol="MT5",
+                    category="EXEC" if ack.status.value == "FILLED" else "BLOCK",
+                    tag=f"ACK {ack.status.value}",
+                    message=f"Order {ack.client_order_id} -> {ack.status.value} (tk={ack.ticket}, px={ack.fill_price}, slip={ack.slippage_points}pt) {ack.message}",
+                )
+            )
+
+        self.open_positions, closed_trades = self.order_sm.reconcile_positions(
+            req.positions,
+            self.specs,
+            self.gate.active_snapshot.version_id,
+            now_sec,
+        )
+
+        # 3. Online learning on every newly closed live trade (RL-1 Bandit + RL-2 Exit + Rollback Guard)
+        for tr in closed_trades:
+            await self.db.save_trade(tr)
+            self.bandit.update(tr.symbol, tr.regime, tr.strategy_id, tr.pnl_r)
+            self.risk.record_trade_outcome(tr.pnl_money, now_sec)
+            self.rl_exit.update_from_closed_trade(
+                peak_r=tr.mfe_r,
+                realized_r=tr.pnl_r,
+                bars_held=max(1, (tr.close_time - tr.open_time) // 60),
+                regime=tr.regime,
+                dl_aligned=tr.dl_confidence >= 0.5,
+                last_action=RLExitAction.MOVE_BE if "MOVE_BE" in tr.rl_exit_trace else RLExitAction.HOLD,
+            )
+            await self.db.set_kv("bandit_state", self.bandit.to_dict(), now_ms)
+            await self.db.set_kv("rl_exit_state", self.rl_exit.to_dict(), now_ms)
+            await self._log_decision(
+                DecisionEvent(
+                    symbol=tr.symbol,
+                    category="EXEC",
+                    tag=f"CLOSED {tr.exit_reason}",
+                    strategy_id=tr.strategy_id,
+                    side=tr.side.value,
+                    message=f"#{tr.ticket} {tr.side.value} {tr.pnl_money:+.2f}$ ({tr.pnl_r:+.2f}R) | MAE {tr.mae_r:.2f}R / MFE +{tr.mfe_r:.2f}R — RL Bandit updated",
+                )
+            )
+            await self._notify(
+                f"Trade Closed: {tr.symbol} {tr.side.value} ({tr.strategy_id})\n"
+                f"PnL: {tr.pnl_money:+.2f}$ ({tr.pnl_r:+.2f}R) | Reason: {tr.exit_reason}"
+            )
+
+            rolled = self.gate.check_live_rollback_guard(self.account.equity, trade_closed=True)
+            if rolled is not None:
+                self.apply_active_config(self.gate.active_config)
+                for sn in self.gate.snapshots:
+                    await self.db.save_snapshot(sn)
+                await self._log_decision(
+                    DecisionEvent(
+                        symbol="SYSTEM",
+                        category="EVOLUTION",
+                        tag="AUTO ROLLBACK",
+                        message=f"Post-promotion drawdown triggered automatic rollback to Champion {rolled.version_id}",
+                    )
+                )
+                await self._notify(f"AUTO-ROLLBACK TRIGGERED! Restored Champion {rolled.version_id}")
+
+        # 4. Ingest live ticks & update Shadow Arena positions
+        for tk in req.ticks:
+            prev = self.ticks.get(tk.symbol)
+            self.ticks[tk.symbol] = tk
+            self.shields.record_spread(tk.symbol, tk.spread_points)
+            if prev is not None:
+                cur_p = self.buy_pressure.get(tk.symbol, 50)
+                delta = 3 if tk.bid > prev.bid else (-3 if tk.bid < prev.bid else 0)
+                self.buy_pressure[tk.symbol] = max(18, min(84, cur_p + delta))
+            await self._update_shadow_positions_on_tick(tk, now_sec)
+
+        # 5. Ingest newly closed bars & run full 4-Pillar AI scan on closed bars
+        if req.closed_bars:
+            await self.db.save_bars(req.closed_bars)
+            for bar in req.closed_bars:
+                buf = self.bars.setdefault(bar.symbol, deque(maxlen=600))
+                if not buf or bar.timestamp > buf[-1].timestamp:
+                    buf.append(bar)
+                await self._evaluate_symbol_on_bar_close(bar, now_sec)
+
+        # 6. Run RL-2 Dynamic Exit management on all open live positions
+        if self.config.ai.rl_exit_enabled and not self.risk.killed:
+            await self._manage_open_positions_with_rl_exit(now_ms)
+
+        # 7. Periodically record equity curve
+        if now_ms - self._last_eq_record_ms >= 5000:
+            self._last_eq_record_ms = now_ms
+            await self.db.record_equity_point(
+                now_ms,
+                self.account.equity,
+                self.shadow_equity,
+                self.account.daily_dd_pct,
+            )
+
+        commands = self.order_sm.pop_commands_for_dispatch(now_ms)
+        self.bridge_latency_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+
+        # Broadcast live frame to WebSocket dashboards
+        if self.ws_clients:
+            asyncio.create_task(self.broadcast_state())
+
+        return BridgeSyncResponse(
+            commands=commands,
+            server_time_ms=now_ms,
+            paused=self.risk.paused,
+            killed=self.risk.killed,
+        )
+
+    async def _evaluate_symbol_on_bar_close(self, bar: Bar, now_sec: int) -> None:
+        t0 = time.perf_counter()
+        sym = bar.symbol
+        self.scans_count += 1
+        bar_list = list(self.bars.get(sym, ()))
+        if len(bar_list) < 40:
+            return
+
+        assess = classify_regime(bar_list)
+        if assess is None:
+            return
+        self.regimes[sym] = assess.regime
+        spec = self.specs.get(sym, DEFAULT_SPECS["XAUUSD"])
+
+        # Shock bar detection
+        self.shields.record_bar_for_shock(sym, bar, assess.indicators.atr14, now_sec)
+
+        # Pillar 1 (DL): 1D-CNN Sequence prediction
+        seq = build_sequence_tensor(bar_list, seq_len=self.config.ai.dl_seq_len, point=spec.point)
+        dl_pred = self.dl_net.predict(seq)
+        self.dl_preds[sym] = dl_pred
+
+        # Market Shields evaluation
+        tick = self.ticks.get(sym)
+        spread_pts = tick.spread_points if tick else bar.spread_points
+        verdict = self.shields.evaluate(sym, spread_pts)
+        self.shield_status[sym] = verdict.reason_code
+        if verdict.should_flatten and self.open_positions:
+            await self.trigger_flatten_all("FRIDAY_CLOSE_FLATTEN")
+            return
+        if not verdict.allowed:
+            self.readiness[sym] = 15
+            self.active_thought = f"{sym} shielded ({verdict.reason_code}): {verdict.detail}"
+            return
+
+        # Scan 4 Scalping Micro-Strategies
+        signals = self.suite.scan_all(sym, bar_list, assess.indicators, assess.regime)
+
+        # Also evaluate Challenger in parallel Live Shadow Arena!
+        await self._scan_shadow_challenger(sym, bar_list, assess.indicators, assess.regime, dl_pred, spread_pts, spec, now_sec)
+
+        if not signals:
+            # Compute live hunting readiness from indicator alignment so Cockpit always shows active hunt progress
+            adx_score = min(45, int(assess.indicators.adx14 * 1.4))
+            dl_dir = int(max(dl_pred.prob_up, dl_pred.prob_down) * 45)
+            self.readiness[sym] = max(18, min(79, adx_score + dl_dir // 2))
+            self.active_thought = (
+                f"{sym} [{assess.regime.value}] hunting M1 setups — ADX {assess.indicators.adx14:.1f} • "
+                f"DL Up {dl_pred.prob_up:.0%}/Dn {dl_pred.prob_down:.0%} • Readiness {self.readiness[sym]}%"
+            )
+            return
+
+        # Pillar 3a (RL-1): Contextual Thompson Bandit selects highest-weighted signal
+        weights = self.bandit.get_weights(sym, assess.regime, explore=True)
+        best_sig = max(signals, key=lambda s: s.confidence * (0.5 + weights.get(s.strategy_id, 0.25)))
+        b_weight = weights.get(best_sig.strategy_id, 0.25)
+
+        # Pillar 2 (ML): Calibrated Meta-Labeler predicts P(win)
+        spread_price = spread_pts * spec.point
+        feat_vec = extract_meta_features(best_sig, assess.indicators, spread_price, dl_pred, bar.timestamp)
+        ml_prob = self.ml_labeler.predict_win_probability(feat_vec)
+        dl_align = dl_pred.prob_up if best_sig.side == Side.BUY else dl_pred.prob_down
+        lat_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+
+        self.readiness[sym] = min(98, int(ml_prob * 100))
+
+        if ml_prob < self.config.ai.ml_min_probability:
+            self.active_thought = f"{sym} {best_sig.strategy_id} {best_sig.side.value} filtered by ML Meta-Labeler (P={ml_prob:.2f} < {self.config.ai.ml_min_probability:.2f})"
+            await self._log_decision(
+                DecisionEvent(
+                    symbol=sym,
+                    category="BLOCK",
+                    tag="ML FILTER",
+                    strategy_id=best_sig.strategy_id,
+                    side=best_sig.side.value,
+                    message=f"Rejected: Calibrated P(win) {ml_prob:.2f} < {self.config.ai.ml_min_probability:.2f} | DL align {dl_align:.2f}",
+                    latency_ms=lat_ms,
+                )
+            )
+            return
+
+        # Portfolio Risk Guard & Broker-Spec Position Sizing
+        risk_dec = self.risk.evaluate_entry(
+            signal=best_sig,
+            account=self.account,
+            open_positions=self.open_positions,
+            spec=spec,
+            spread_points=spread_pts,
+            ml_probability=ml_prob,
+            bandit_weight=b_weight,
+            now_ts=now_sec,
+        )
+        if not risk_dec.approved:
+            self.active_thought = f"{sym} {best_sig.strategy_id} blocked by Risk Guard ({risk_dec.reason_code})"
+            await self._log_decision(
+                DecisionEvent(
+                    symbol=sym,
+                    category="BLOCK",
+                    tag=risk_dec.reason_code,
+                    strategy_id=best_sig.strategy_id,
+                    side=best_sig.side.value,
+                    message=risk_dec.detail,
+                    latency_ms=lat_ms,
+                )
+            )
+            return
+
+        # In SHADOW_ONLY mode, log & skip real MT5 dispatch
+        if self.config.app.trading_mode == TradingMode.SHADOW_ONLY:
+            await self._log_decision(
+                DecisionEvent(
+                    symbol=sym,
+                    category="AI",
+                    tag="SHADOW ONLY",
+                    strategy_id=best_sig.strategy_id,
+                    side=best_sig.side.value,
+                    message=f"Validated setup ({risk_dec.volume} lot, ML {ml_prob:.0%}, DL {dl_align:.0%}) — live dispatch muted in SHADOW_ONLY",
+                    latency_ms=lat_ms,
+                )
+            )
+            return
+
+        # Dispatch idempotent OrderCommand to MT5 EA
+        now_ms = utc_now_ms()
+        cmd = OrderCommand(
+            action=OrderAction.OPEN,
+            symbol=sym,
+            broker_symbol=spec.broker_symbol,
+            side=best_sig.side,
+            volume=risk_dec.volume,
+            sl=risk_dec.adjusted_sl,
+            tp=risk_dec.adjusted_tp,
+            magic=self.config.instruments.magic_number,
+            strategy_id=best_sig.strategy_id,
+            expected_price=tick.ask if (tick and best_sig.side == Side.BUY) else (tick.bid if tick else best_sig.entry_price),
+            created_at_ms=now_ms,
+            expires_at_ms=now_ms + self.config.instruments.order_ttl_ms,
+        )
+        queued = self.order_sm.enqueue(
+            cmd,
+            strategy_id=best_sig.strategy_id,
+            regime=assess.regime,
+            ml_confidence=ml_prob,
+            dl_confidence=dl_align,
+            bandit_weight=b_weight,
+            spread_at_entry=spread_pts,
+        )
+        if queued:
+            self.active_thought = (
+                f"FIRING {sym} {best_sig.side.value} {risk_dec.volume} lot via {best_sig.strategy_id} "
+                f"(ML {ml_prob:.0%}, DL {dl_align:.0%}, Bandit {b_weight:.0%})"
+            )
+            await self._log_decision(
+                DecisionEvent(
+                    symbol=sym,
+                    category="EXEC",
+                    tag="ORDER SENT",
+                    strategy_id=best_sig.strategy_id,
+                    side=best_sig.side.value,
+                    message=f"{best_sig.side.value} {risk_dec.volume} lot | ML {ml_prob:.0%} • DL {dl_align:.0%} • {best_sig.reason}",
+                    latency_ms=lat_ms,
+                )
+            )
+
+    async def _manage_open_positions_with_rl_exit(self, now_ms: int) -> None:
+        for pos in self.open_positions:
+            meta = self.order_sm.active_positions.get(pos.ticket)
+            if meta is None:
+                continue
+            spec = self.specs.get(pos.symbol, DEFAULT_SPECS["XAUUSD"])
+            cur_r = (
+                (pos.current_price - meta.entry_price) / meta.initial_risk_price
+                if meta.side == Side.BUY
+                else (meta.entry_price - pos.current_price) / meta.initial_risk_price
+            )
+            dl = self.dl_preds.get(pos.symbol, DLPrediction())
+            dl_aligned = (dl.prob_up >= dl.prob_down) if meta.side == Side.BUY else (dl.prob_down >= dl.prob_up)
+
+            action = self.rl_exit.select_action(
+                unrealized_r=cur_r,
+                bars_held=meta.bars_held,
+                regime=meta.regime,
+                dl_aligned=dl_aligned,
+                already_at_be=meta.already_at_be,
+                already_partial=meta.already_partial,
+            )
+            meta.last_rl_action = action
+            pos.rl_exit_action = action
+
+            if action == RLExitAction.MOVE_BE and not meta.already_at_be:
+                be_sl = (
+                    round(meta.entry_price + 0.06 * meta.initial_risk_price, spec.digits)
+                    if meta.side == Side.BUY
+                    else round(meta.entry_price - 0.06 * meta.initial_risk_price, spec.digits)
+                )
+                meta.already_at_be = True
+                meta.rl_trace.append("MOVE_BE")
+                self.order_sm.enqueue(
+                    OrderCommand(
+                        action=OrderAction.MODIFY,
+                        symbol=pos.symbol,
+                        broker_symbol=spec.broker_symbol,
+                        ticket=pos.ticket,
+                        sl=be_sl,
+                        tp=pos.tp,
+                        expires_at_ms=now_ms + 3000,
+                    )
+                )
+                await self._log_decision(
+                    DecisionEvent(
+                        symbol=pos.symbol,
+                        category="EXEC",
+                        tag="RL-2 MOVE_BE",
+                        strategy_id=meta.strategy_id,
+                        message=f"Moved #{pos.ticket} SL to Breakeven ({be_sl}) at +{cur_r:.2f}R",
+                    )
+                )
+            elif action == RLExitAction.TIGHT_TRAIL:
+                trail_sl = (
+                    round(pos.current_price - 0.55 * meta.initial_risk_price, spec.digits)
+                    if meta.side == Side.BUY
+                    else round(pos.current_price + 0.55 * meta.initial_risk_price, spec.digits)
+                )
+                improves = (meta.side == Side.BUY and trail_sl > pos.sl + spec.point * 5) or (
+                    meta.side == Side.SELL and (pos.sl == 0 or trail_sl < pos.sl - spec.point * 5)
+                )
+                if improves:
+                    meta.already_at_be = True
+                    if meta.rl_trace[-1] != "TIGHT_TRAIL":
+                        meta.rl_trace.append("TIGHT_TRAIL")
+                    self.order_sm.enqueue(
+                        OrderCommand(
+                            action=OrderAction.MODIFY,
+                            symbol=pos.symbol,
+                            broker_symbol=spec.broker_symbol,
+                            ticket=pos.ticket,
+                            sl=trail_sl,
+                            tp=pos.tp,
+                            expires_at_ms=now_ms + 3000,
+                        )
+                    )
+            elif action == RLExitAction.PARTIAL_50 and not meta.already_partial and pos.volume >= spec.volume_min * 2:
+                meta.already_partial = True
+                meta.rl_trace.append("PARTIAL_50")
+                self.order_sm.enqueue(
+                    OrderCommand(
+                        action=OrderAction.PARTIAL_CLOSE,
+                        symbol=pos.symbol,
+                        broker_symbol=spec.broker_symbol,
+                        ticket=pos.ticket,
+                        expires_at_ms=now_ms + 3000,
+                    )
+                )
+            elif action == RLExitAction.EXIT_NOW and cur_r < -0.25 and meta.bars_held >= 9:
+                meta.rl_trace.append("EXIT_NOW")
+                self.order_sm.enqueue(
+                    OrderCommand(
+                        action=OrderAction.CLOSE,
+                        symbol=pos.symbol,
+                        broker_symbol=spec.broker_symbol,
+                        ticket=pos.ticket,
+                        expires_at_ms=now_ms + 3000,
+                    )
+                )
+
+    async def _scan_shadow_challenger(
+        self,
+        sym: str,
+        bars: list[Bar],
+        snap: Any,
+        regime: MarketRegime,
+        dl_pred: DLPrediction,
+        spread_pts: float,
+        spec: SymbolSpec,
+        now_sec: int,
+    ) -> None:
+        if sym in self.shadow_positions:
+            return
+        cand = self.gate.active_challenger
+        shadow_cfg = TradingConfig.model_validate(cand.config_snapshot) if cand else self.config
+        sigs = self.shadow_suite.scan_all(sym, bars, snap, regime)
+        if not sigs:
+            return
+        best = max(sigs, key=lambda s: s.confidence)
+        spread_px = spread_pts * spec.point
+        if (spread_px / max(snap.atr14, 1e-9)) > shadow_cfg.risk.max_spread_atr_ratio:
+            return
+        feat = extract_meta_features(best, snap, spread_px, dl_pred, bars[-1].timestamp)
+        ml_p = self.ml_labeler.predict_win_probability(feat)
+        if ml_p < shadow_cfg.ai.ml_min_probability:
+            return
+        entry = best.entry_price + (spread_px if best.side == Side.BUY else 0.0)
+        risk_d = max(abs(entry - best.sl_price), snap.atr14 * 0.5)
+        self.shadow_positions[sym] = ShadowPosition(
+            symbol=sym,
+            strategy_id=best.strategy_id,
+            regime=regime,
+            side=best.side,
+            entry_price=round(entry, spec.digits),
+            sl=round(best.sl_price, spec.digits),
+            tp=round(best.tp_price, spec.digits),
+            risk_dist=risk_d,
+            open_time=now_sec,
+            ml_conf=ml_p,
+            dl_conf=dl_pred.prob_up if best.side == Side.BUY else dl_pred.prob_down,
+            spread_pts=spread_pts,
+            version_id=cand.version_id if cand else f"{self.config.app.version}-shadow",
+        )
+
+    async def _update_shadow_positions_on_tick(self, tk: TickSnapshot, now_sec: int) -> None:
+        spos = self.shadow_positions.get(tk.symbol)
+        if spos is None:
+            return
+        px = tk.bid if spos.side == Side.BUY else tk.ask
+        cur_r = (
+            (px - spos.entry_price) / spos.risk_dist
+            if spos.side == Side.BUY
+            else (spos.entry_price - px) / spos.risk_dist
+        )
+        spos.mae_r = min(spos.mae_r, cur_r)
+        spos.mfe_r = max(spos.mfe_r, cur_r)
+
+        hit_sl = (spos.side == Side.BUY and px <= spos.sl) or (spos.side == Side.SELL and px >= spos.sl)
+        hit_tp = (spos.side == Side.BUY and px >= spos.tp) or (spos.side == Side.SELL and px <= spos.tp)
+        timed_out = (now_sec - spos.open_time) >= 20 * 60
+
+        if hit_sl or hit_tp or timed_out:
+            self.shadow_positions.pop(tk.symbol, None)
+            net_r = cur_r - 0.04
+            risk_money = self.shadow_equity * (self.config.risk.risk_per_trade_pct / 100.0)
+            pnl = round(risk_money * net_r, 2)
+            self.shadow_equity = round(self.shadow_equity + pnl, 2)
+            tr = TradeRecord(
+                is_shadow=True,
+                version_id=spos.version_id,
+                symbol=spos.symbol,
+                strategy_id=spos.strategy_id,
+                regime=spos.regime,
+                side=spos.side,
+                volume=0.10,
+                entry_price=spos.entry_price,
+                exit_price=px,
+                sl_price=spos.sl,
+                tp_price=spos.tp,
+                open_time=spos.open_time,
+                close_time=now_sec,
+                pnl_money=pnl,
+                pnl_r=round(net_r, 4),
+                mae_r=round(spos.mae_r, 4),
+                mfe_r=round(spos.mfe_r, 4),
+                spread_at_entry=spos.spread_pts,
+                ml_confidence=spos.ml_conf,
+                dl_confidence=spos.dl_conf,
+                exit_reason="TP" if hit_tp else ("SL" if hit_sl else "TIME_EXPIRY"),
+            )
+            await self.db.save_trade(tr)
+            transition = self.gate.record_shadow_trade(tr)
+            if transition and self.gate.active_challenger:
+                await self.db.save_challenger(self.gate.active_challenger)
+            if transition == "PENDING_APPROVAL":
+                await self._notify(f"Challenger passed Live Shadow Arena! Ready for /approve on Dashboard or Telegram.")
+            elif transition == "AUTO_PROMOTED":
+                self.apply_active_config(self.gate.active_config)
+                for sn in self.gate.snapshots:
+                    await self.db.save_snapshot(sn)
+                await self._notify(f"Challenger AUTO-PROMOTED to Champion {self.gate.active_snapshot.version_id}!")
+
+    async def run_evolution_cycle(self) -> dict[str, Any]:
+        """Full 4-Stage Self-Improvement Cycle: Reflection -> Purged WFO + DL/ML Retrain -> Monte Carlo -> Shadow Gate."""
+        if self.evolution_running:
+            return {"status": "already_running"}
+        self.evolution_running = True
+        try:
+            bars_map = {s: list(buf) for s, buf in self.bars.items() if len(buf) >= 120}
+            if not bars_map:
+                return {"status": "insufficient_bars", "message": "Need at least 120 closed M1 bars per symbol"}
+
+            recent_trades = await self.db.list_trades(limit=60)
+            reflection = await self.reflector.reflect(recent_trades, self.config)
+            await self.db.save_reflection(reflection)
+
+            # Run heavy WFO + DL/ML retraining off the event loop so tick handling never stalls
+            wfo = await asyncio.to_thread(
+                self.optimizer.run,
+                bars_map,
+                self.config,
+                reflection.patches,
+                self.specs,
+            )
+
+            # Adopt freshly trained DL 1D-CNN & Calibrated ML Meta-Labeler if valid
+            if wfo.trained_dl.trained:
+                self.dl_net = wfo.trained_dl
+                self.dl_net.save(f"{self.config.app.snapshots_dir}/dl_champion.npz")
+            if wfo.trained_ml.trained:
+                self.ml_labeler = wfo.trained_ml
+
+            cand = self.gate.submit_candidate(
+                candidate_config=wfo.best_config,
+                patches=wfo.best_patches,
+                challenger_oos=wfo.challenger_oos,
+                champion_oos=wfo.champion_oos,
+                source="HYBRID" if reflection.patches else "WFO",
+                reflection_id=reflection.report_id,
+            )
+            reflection.gate_status = "IN_SHADOW" if cand.status == "SHADOWING" else "REJECTED"
+            await self.db.save_reflection(reflection)
+            await self.db.save_challenger(cand)
+
+            if cand.status == "SHADOWING":
+                self.shadow_suite = StrategySuite.from_config(wfo.best_config)
+
+            await self._log_decision(
+                DecisionEvent(
+                    symbol="EVOLUTION",
+                    category="EVOLUTION",
+                    tag=f"WFO {cand.status}",
+                    message=f"{cand.version_id} | OOS PF={cand.oos_metrics.profit_factor:.2f} MC-P95={cand.oos_metrics.mc_p95_dd_pct:.2f}% | {cand.rejection_reason or 'Deployed to Live Shadow Arena'}",
+                )
+            )
+            await self._notify(
+                f"Evolution Cycle Complete ({cand.version_id}): {cand.status}\n"
+                f"OOS PF: {cand.oos_metrics.profit_factor:.2f} | MC P95 DD: {cand.oos_metrics.mc_p95_dd_pct:.2f}%"
+            )
+            return {
+                "status": "completed",
+                "challenger": cand.model_dump(mode="json"),
+                "reflection": reflection.model_dump(mode="json"),
+                "dl_train": wfo.dl_train_summary,
+                "ml_train": wfo.ml_train_summary,
+            }
+        finally:
+            self.evolution_running = False
+
+    async def trigger_flatten_all(self, reason: str = "MANUAL_KILL") -> None:
+        self.risk.killed = True
+        self.risk.paused = True
+        now_ms = utc_now_ms()
+        self.order_sm.enqueue(
+            OrderCommand(
+                action=OrderAction.FLATTEN_ALL,
+                symbol="ALL",
+                expires_at_ms=now_ms + 10000,
+            )
+        )
+        await self._log_decision(
+            DecisionEvent(
+                symbol="SYSTEM",
+                category="RISK",
+                tag="KILL SWITCH",
+                message=f"FLATTEN_ALL dispatched ({reason}) — Engine locked.",
+            )
+        )
+        await self._notify(f"EMERGENCY KILL-SWITCH ACTIVATED ({reason})! Flattening all positions.")
+
+    async def trigger_manual_close(self, ticket: int) -> bool:
+        pos = next((p for p in self.open_positions if p.ticket == ticket), None)
+        if pos is None:
+            return False
+        spec = self.specs.get(pos.symbol, DEFAULT_SPECS["XAUUSD"])
+        self.order_sm.enqueue(
+            OrderCommand(
+                action=OrderAction.CLOSE,
+                symbol=pos.symbol,
+                broker_symbol=spec.broker_symbol,
+                ticket=ticket,
+                expires_at_ms=utc_now_ms() + 5000,
+            )
+        )
+        await self._log_decision(
+            DecisionEvent(symbol=pos.symbol, category="EXEC", tag="MANUAL CLOSE", message=f"Dispatched close for #{ticket}")
+        )
+        return True
+
+    async def force_demo_signal(self, symbol: str) -> dict[str, Any]:
+        """Allow operator in Simulator/Demo mode to trigger a live validated signal immediately."""
+        sym = symbol if symbol in self.specs else self.config.instruments.symbols[0]
+        spec = self.specs[sym]
+        tick = self.ticks.get(sym)
+        if tick is None:
+            return {"ok": False, "reason": "No tick data yet"}
+        dl = self.dl_preds.get(sym, DLPrediction())
+        side = Side.BUY if dl.prob_up >= dl.prob_down else Side.SELL
+        bars = list(self.bars.get(sym, ()))
+        atr_est = (bars[-1].high - bars[-1].low) * 1.5 if bars else spec.point * 120
+        atr_est = max(atr_est, spec.point * 40)
+        entry = tick.ask if side == Side.BUY else tick.bid
+        sl = round(entry - 1.4 * atr_est if side == Side.BUY else entry + 1.4 * atr_est, spec.digits)
+        tp = round(entry + 2.2 * atr_est if side == Side.BUY else entry - 2.2 * atr_est, spec.digits)
+        cmd = OrderCommand(
+            action=OrderAction.OPEN,
+            symbol=sym,
+            broker_symbol=spec.broker_symbol,
+            side=side,
+            volume=max(spec.volume_min, 0.10),
+            sl=sl,
+            tp=tp,
+            magic=self.config.instruments.magic_number,
+            strategy_id="liquidity_sweep",
+            expected_price=entry,
+            expires_at_ms=utc_now_ms() + 4000,
+        )
+        ok = self.order_sm.enqueue(
+            cmd,
+            strategy_id="liquidity_sweep",
+            regime=self.regimes.get(sym, MarketRegime.RANGING),
+            ml_confidence=0.72,
+            dl_confidence=max(dl.prob_up, dl.prob_down, 0.65),
+            bandit_weight=0.32,
+            spread_at_entry=tick.spread_points,
+        )
+        if ok:
+            self.readiness[sym] = 96
+            await self._log_decision(
+                DecisionEvent(
+                    symbol=sym,
+                    category="EXEC",
+                    tag="DEMO SIGNAL",
+                    strategy_id="liquidity_sweep",
+                    side=side.value,
+                    message=f"Operator triggered {side.value} {cmd.volume} lot @ {entry} (SL {sl} / TP {tp})",
+                )
+            )
+        return {"ok": ok, "client_order_id": cmd.client_order_id}
+
+    def get_live_state_snapshot(self) -> dict[str, Any]:
+        now_ms = utc_now_ms()
+        stale_sec = round((now_ms - self.last_bridge_sync_ms) / 1000.0, 1) if self.last_bridge_sync_ms else 999.0
+        radar = []
+        for sym in self.config.instruments.symbols:
+            tk = self.ticks.get(sym)
+            spec = self.specs.get(sym, DEFAULT_SPECS["XAUUSD"])
+            b_list = list(self.bars.get(sym, ()))
+            last_bars = [b.model_dump() for b in b_list[-60:]]
+            atr_approx = max((b_list[-1].high - b_list[-1].low), spec.point * 25) if b_list else spec.point * 50
+            sp_atr_pct = round(((tk.spread_points * spec.point) / atr_approx) * 100.0, 1) if tk else 0.0
+            radar.append(
+                {
+                    "symbol": sym,
+                    "digits": spec.digits,
+                    "point": spec.point,
+                    "bid": tk.bid if tk else 0.0,
+                    "ask": tk.ask if tk else 0.0,
+                    "spread_points": tk.spread_points if tk else 0.0,
+                    "spread_atr_pct": min(99.0, sp_atr_pct),
+                    "regime": self.regimes.get(sym, MarketRegime.RANGING).value,
+                    "dl": self.dl_preds.get(sym, DLPrediction()).model_dump(),
+                    "readiness": self.readiness.get(sym, 30),
+                    "buy_pressure": self.buy_pressure.get(sym, 50),
+                    "shield": self.shield_status.get(sym, "CLEAR"),
+                    "bars": last_bars,
+                }
+            )
+
+        return {
+            "server_time_ms": now_ms,
+            "trading_mode": self.config.app.trading_mode.value,
+            "champion_version": self.gate.active_snapshot.version_id,
+            "auto_promote": self.config.app.auto_promote_challenger,
+            "paused": self.risk.paused,
+            "killed": self.risk.killed,
+            "evolution_running": self.evolution_running,
+            "bridge_connected": stale_sec < 6.0,
+            "bridge_stale_sec": stale_sec,
+            "bridge_latency_ms": self.bridge_latency_ms,
+            "ticks_per_sec": self.ticks_per_sec,
+            "scans_count": self.scans_count,
+            "active_thought": self.active_thought,
+            "account": self.account.model_dump(),
+            "shadow_equity": self.shadow_equity,
+            "hard_guard": self.hard_guard.model_dump(),
+            "radar": radar,
+            "positions": [p.model_dump(mode="json") for p in self.open_positions],
+            "decisions": [d.model_dump(mode="json") for d in list(self.recent_decisions)[:40]],
+            "active_challenger": self.gate.active_challenger.model_dump(mode="json") if self.gate.active_challenger else None,
+            "manual_shield_override": self.shields.manual_shock_override,
+        }
+
+    async def broadcast_state(self) -> None:
+        if not self.ws_clients:
+            return
+        payload = self.get_live_state_snapshot()
+        dead = []
+        for ws in list(self.ws_clients):
+            try:
+                await ws.send_json(payload)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            self.ws_clients.discard(ws)
