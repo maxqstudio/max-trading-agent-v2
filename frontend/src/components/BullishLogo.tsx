@@ -1,16 +1,33 @@
 import React from 'react';
 
-// Max Quant mark: a bull with its head down, charging, horns thrusting upward (the "bullish" pose).
-const BODY =
-  'M4 14C4 12 6 11 8 11C11 10 13 8 16 7.5C18.5 7.2 20.5 8.5 22 10.5L25.5 13C27 13.6 28.3 15 28.6 16.8L29 19.2C29.1 20.3 28.2 21 27.2 20.7L24.5 19.8C23.5 20.8 22.5 21.6 21.5 22L22 26L20 26L19.2 22.6L18 26.2L16.2 26.2L16.6 22.8C13.5 23.3 10.5 23.2 8.6 22.6L7 26L5 26L5.8 21.6C4.6 20.2 4 17.5 4 14Z';
-const HORNS = 'M26.6 14.2C28.6 13.4 29.8 11.4 29.6 8.2M25.2 13.2C26.8 12 27.6 10.2 27.3 7.6';
-const TAIL = 'M4.2 13C2.6 13.6 2.1 15.4 2.8 17.4';
-
+// Max Quant mark: bull and bear locked in a yin-yang circle. The red bear holds the left,
+// the green bull rises on the right with its horns thrusting up.
 export const BullishLogo: React.FC<{ size?: number }> = ({ size = 32 }) => (
-  <svg width={size} height={size} viewBox="0 0 32 32" role="img" aria-label="Max Quant" xmlns="http://www.w3.org/2000/svg">
-    <rect x="0.5" y="0.5" width="31" height="31" rx="8" fill="#10B981" fillOpacity="0.14" stroke="#10B981" strokeOpacity="0.5" />
-    <path d={BODY} fill="#10B981" />
-    <path d={HORNS} fill="none" stroke="#10B981" strokeWidth="1.6" strokeLinecap="round" />
-    <path d={TAIL} fill="none" stroke="#10B981" strokeWidth="1.1" strokeLinecap="round" />
+  <svg width={size} height={size} viewBox="0 0 64 64" role="img" aria-label="Max Quant" xmlns="http://www.w3.org/2000/svg">
+    <circle cx="32" cy="32" r="31" fill="#0A101B"/>
+    <circle cx="32" cy="32" r="27.5" fill="#10B981"/>
+    <path d="M51.45 12.55A27.5 27.5 0 0 0 12.55 51.45A13.75 13.75 0 0 0 32 32A13.75 13.75 0 0 1 51.45 12.55Z" fill="#EF4444"/>
+    <path d="M51.45 12.55A13.75 13.75 0 0 0 32 32A13.75 13.75 0 0 1 12.55 51.45" fill="none" stroke="#0A101B" strokeWidth="2.2"/>
+    <g fill="#0A101B">
+      <circle cx="11.6" cy="16.6" r="3.8"/>
+      <circle cx="24.4" cy="14" r="3.8"/>
+      <path d="M9.4 25C8.6 18.6 13 14.6 18.6 14.6C24.6 14.6 28.8 18.6 28.2 24.6C27.8 29.6 24 33.8 18.8 34C13.6 34.2 10 30.4 9.4 25Z"/>
+    </g>
+    <circle cx="11.6" cy="16.6" r="1.6" fill="#EF4444"/>
+    <circle cx="24.4" cy="14" r="1.6" fill="#EF4444"/>
+    <path d="M13.2 21.4L16.8 22.8M24.4 20.6L21 22.4" stroke="#EF4444" strokeWidth="1.5" strokeLinecap="round"/>
+    <ellipse cx="18.9" cy="28" rx="5.4" ry="4.2" fill="#EF4444"/>
+    <ellipse cx="18.9" cy="25.6" rx="1.8" ry="1.1" fill="#0A101B"/>
+    <path d="M15.6 28C17.4 27.2 20.6 27.2 22.2 28C21.8 30.4 20.6 31.4 18.9 31.4C17.2 31.4 16 30.4 15.6 28Z" fill="#0A101B"/>
+    <path d="M16.6 27.9L17.3 29.6L18.1 27.7ZM21.2 27.9L20.5 29.6L19.7 27.7Z" fill="#FFFFFF"/>
+    <g fill="#0A101B">
+      <path d="M36.6 40.2C30.6 39.4 28.4 33.4 30.8 26.8C31.2 32.2 33.6 35.6 38 36.8Z"/>
+      <path d="M49.4 40.2C55.4 39.4 57.6 33.4 55.2 26.8C54.8 32.2 52.4 35.6 48 36.8Z"/>
+      <path d="M36 37.6C40.4 36 45.6 36 50 37.6L48.6 49.6C48.2 53 45.8 55 43 55C40.2 55 37.8 53 37.4 49.6Z"/>
+      <path d="M36.4 40L31.6 41.8L37 44Z"/>
+      <path d="M49.6 40L54.4 41.8L49 44Z"/>
+    </g>
+    <path d="M38.6 42.4L41.6 43.6M47.4 42.4L44.4 43.6" stroke="#10B981" strokeWidth="1.5" strokeLinecap="round"/>
+    <circle cx="43" cy="52.6" r="2.4" fill="none" stroke="#FFFFFF" strokeWidth="1.2"/>
   </svg>
 );
