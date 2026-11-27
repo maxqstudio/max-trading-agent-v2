@@ -125,14 +125,14 @@ class ExitConfig(BaseModel):
 
 
 class HitRunConfig(BaseModel):
-    take_r: float = 0.5  # minimum profit before Hit & Run takes it
-    min_spread_mult: float = 2.0  # and at least 2x spread
-    trail_dist_r: float = 0.15  # 0 = close at once when take_r is reached
-    be_offset_r: float = 0.05
-    # Learn the take level (0.3/0.5/0.7/1.0R) per symbol+regime; take_r stays the default
-    # until a group has adaptive_min_samples trades and another level is clearly better.
-    adaptive: bool = True
-    adaptive_min_samples: int = 20
+    """Hit & Run: close as soon as the trade is in net profit (after spread, commission, swap)."""
+
+    # Close as soon as the net profit (after spread, commission, swap) is at least this much
+    # money per trade. $1 also leaves room for slippage on the close.
+    min_net_profit: float = 1.0
+    # Round-trip commission per lot for paper trades and when MT5 has not reported one.
+    # None = use the symbol's commission_per_lot.
+    commission_per_lot: float | None = None
 
 
 class PaperConfig(BaseModel):

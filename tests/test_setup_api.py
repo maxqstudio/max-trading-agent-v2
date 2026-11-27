@@ -171,7 +171,7 @@ def test_paper_compare_and_exit_settings(client):
     r = c.get("/api/paper/compare").json()
     assert [row["book"] for row in r["rows"]] == ["normal", "hitrun", "mt5"]
     assert r["learning"]["adaptive"] is True and r["learning"]["min_samples"] == 20
-    r = c.put("/api/setup/exits", json={"adaptive": False, "hit_take_r": 0.6, "be_at_r": 0.4}).json()
-    assert r["exits"]["adaptive"] is False and r["exits"]["be_at_r"] == 0.4 and r["hit_run"]["take_r"] == 0.6
+    r = c.put("/api/setup/exits", json={"adaptive": False, "hit_min_net_profit": 2.5, "be_at_r": 0.4}).json()
+    assert r["exits"]["adaptive"] is False and r["exits"]["be_at_r"] == 0.4 and r["hit_run"]["min_net_profit"] == 2.5
     assert c.get("/api/paper/compare").json()["learning"]["adaptive"] is False
     assert c.put("/api/setup/exits", json={"be_at_r": 9}).status_code == 422
