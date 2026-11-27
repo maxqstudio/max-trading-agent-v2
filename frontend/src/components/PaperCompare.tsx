@@ -171,31 +171,47 @@ export const PaperCompare: React.FC = () => {
             </tr>
           </thead>
           <tbody className="divide-y divide-[#1F2D45] mono">
-            {[...(data?.rows ?? []), ...(data?.challengers ?? [])].map((r) => (
-              <tr key={r.book} className={r.book === 'mt5' ? 'text-[#8A9BB5]' : ''}>
-                <td className="py-1.5 px-2 font-sans font-bold whitespace-nowrap" style={{ color: COLOR[r.book] }}>
-                  {r.label}
-                  {best === r.book ? <span className="ml-1.5 px-1 rounded bg-[#10B981]/15 text-[#10B981] text-[10px]">leading</span> : null}
-                  {r.open_positions ? <span className="ml-1.5 text-[#8A9BB5] font-normal">({r.open_positions} open)</span> : null}
-                </td>
-                <td className="py-1.5 px-2 text-right">${r.equity.toFixed(0)}</td>
-                <td className="py-1.5 px-2 text-right">{r.trades}</td>
-                <td className="py-1.5 px-2 text-right">{r.trades ? `${r.win_rate.toFixed(1)}%` : '—'}</td>
-                <td
-                  className={`py-1.5 px-2 text-right ${
-                    r.breakeven_win_rate == null ? '' : r.win_rate >= r.breakeven_win_rate ? 'text-[#10B981]' : 'text-[#EF4444]'
-                  }`}
-                >
-                  {r.breakeven_win_rate == null ? '—' : `${r.breakeven_win_rate.toFixed(1)}%`}
-                </td>
-                <td className="py-1.5 px-2 text-right">{r.profit_factor == null ? '—' : r.profit_factor.toFixed(2)}</td>
-                <td className={`py-1.5 px-2 text-right font-bold ${r.net_pnl >= 0 ? 'text-[#10B981]' : 'text-[#EF4444]'}`}>{money(r.net_pnl)}</td>
-                <td className="py-1.5 px-2 text-right">{r.trades ? `${money(r.avg_win)} / ${money(r.avg_loss)}` : '—'}</td>
-                <td className="py-1.5 px-2 text-right">{r.trades ? signed(r.avg_r) : '—'}</td>
-                <td className="py-1.5 px-2 text-right">{r.max_dd_pct.toFixed(2)}%</td>
-                <td className="py-1.5 px-2 text-right">{r.losers_after_half_r}</td>
-              </tr>
-            ))}
+            {[
+              { title: 'Paper · AI Supervised & Filtered', items: (data?.rows ?? []).filter((r) => r.book === 'normal' || r.book === 'hitrun') },
+              { title: 'Paper · No Veto (Raw Market Baseline)', items: (data?.rows ?? []).filter((r) => r.book === 'raw' || r.book === 'raw_hitrun') },
+              { title: 'Evolution · Challenger Arena', items: data?.challengers ?? [] },
+              { title: 'Broker Account', items: (data?.rows ?? []).filter((r) => r.book === 'mt5') },
+            ]
+              .filter((g) => g.items.length > 0)
+              .map((group) => (
+                <React.Fragment key={group.title}>
+                  <tr className="bg-[#0A101B]/80">
+                    <td colSpan={11} className="py-1 px-2 font-sans text-[10px] font-bold uppercase tracking-wider text-[#64748B]">
+                      {group.title}
+                    </td>
+                  </tr>
+                  {group.items.map((r) => (
+                    <tr key={r.book} className={r.book === 'mt5' ? 'text-[#8A9BB5]' : ''}>
+                      <td className="py-1.5 px-2 font-sans font-bold whitespace-nowrap" style={{ color: COLOR[r.book] }}>
+                        {r.label}
+                        {best === r.book ? <span className="ml-1.5 px-1 rounded bg-[#10B981]/15 text-[#10B981] text-[10px]">leading</span> : null}
+                        {r.open_positions ? <span className="ml-1.5 text-[#8A9BB5] font-normal">({r.open_positions} open)</span> : null}
+                      </td>
+                      <td className="py-1.5 px-2 text-right">${r.equity.toFixed(0)}</td>
+                      <td className="py-1.5 px-2 text-right">{r.trades}</td>
+                      <td className="py-1.5 px-2 text-right">{r.trades ? `${r.win_rate.toFixed(1)}%` : '—'}</td>
+                      <td
+                        className={`py-1.5 px-2 text-right ${
+                          r.breakeven_win_rate == null ? '' : r.win_rate >= r.breakeven_win_rate ? 'text-[#10B981]' : 'text-[#EF4444]'
+                        }`}
+                      >
+                        {r.breakeven_win_rate == null ? '—' : `${r.breakeven_win_rate.toFixed(1)}%`}
+                      </td>
+                      <td className="py-1.5 px-2 text-right">{r.profit_factor == null ? '—' : r.profit_factor.toFixed(2)}</td>
+                      <td className={`py-1.5 px-2 text-right font-bold ${r.net_pnl >= 0 ? 'text-[#10B981]' : 'text-[#EF4444]'}`}>{money(r.net_pnl)}</td>
+                      <td className="py-1.5 px-2 text-right">{r.trades ? `${money(r.avg_win)} / ${money(r.avg_loss)}` : '—'}</td>
+                      <td className="py-1.5 px-2 text-right">{r.trades ? signed(r.avg_r) : '—'}</td>
+                      <td className="py-1.5 px-2 text-right">{r.max_dd_pct.toFixed(2)}%</td>
+                      <td className="py-1.5 px-2 text-right">{r.losers_after_half_r}</td>
+                    </tr>
+                  ))}
+                </React.Fragment>
+              ))}
             {!data && !err ? (
               <tr>
                 <td colSpan={11} className="py-4 text-center text-[#8A9BB5] font-sans">

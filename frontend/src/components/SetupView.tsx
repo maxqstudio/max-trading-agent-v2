@@ -7,9 +7,11 @@ import { FiltersCard } from './FiltersCard';
 import { human } from '../labels';
 import { LOGO_FULL_URL } from './BullishLogo';
 
-// Setup page: AI providers (order, key, model from the provider's list, fallback models),
-// AI Supervisor settings, MT5 and safety info. Keys are written to the local .env only
-// and come back masked. Live trading can't be unlocked here.
+// Setup page:
+// 1. API Providers (credentials & connection checks)
+// 2. Cross-provider Main Model Chain (Reflection / Evolution) & Fast Model Chain (AI Supervisor)
+// 3. AI Supervisor, MT5, Broker Costs, Hit & Run, Market Filters, and Safety info.
+// Keys are written to local .env only and returned masked. Live trading cannot be unlocked here.
 
 type Provider = {
   name: string;
@@ -30,34 +32,17 @@ type Provider = {
   stats: { calls?: number; failures?: number; last_error?: string; total_cost_usd?: number };
 };
 
-type Draft = { api_key: string; clear_key: boolean; model: string; fast_model: string; base_url: string; fallback_models: string[] };
+type Draft = { api_key: string; clear_key: boolean; base_url: string };
 
 const inputCls = 'w-full px-2 py-1.5 rounded bg-[#070B12] border border-[#1F2D45] mono text-xs focus:outline-none focus:border-[#3B82F6]';
 const btnCls = 'px-2.5 py-1.5 rounded text-xs font-bold cursor-pointer border flex items-center gap-1 disabled:opacity-50';
 const LOCAL = new Set(['ollama', 'llamacpp', 'custom']);
 
-const ModelPicker: React.FC<{ value: string; options: string[]; onChange: (v: string) => void; placeholder: string }> = ({
-  value,
-  options,
-  onChange,
-  placeholder,
-}) =>
-  options.length ? (
-    <select value={value} onChange={(e) => onChange(e.target.value)} className={inputCls}>
-      {!options.includes(value) && value && <option value={value}>{value} (manual)</option>}
-      {options.map((m) => (
-        <option key={m} value={m}>
-          {m}
-        </option>
-      ))}
-    </select>
-  ) : (
-    <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} className={inputCls} />
-  );
-
 export const SetupView: React.FC<{ onToast: (msg: string) => void }> = ({ onToast }) => {
   const [setup, setSetup] = useState<any>(null);
   const [chain, setChain] = useState<string[]>([]);
+  const [mainChain, setMainChain] = useState<string[]>([]);
+  const [fastChain, setFastChain] = useState<string[]>([]);
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const [models, setModels] = useState<Record<string, string[]>>({});
   const [busy, setBusy] = useState<string>('');
@@ -69,9 +54,11 @@ export const SetupView: React.FC<{ onToast: (msg: string) => void }> = ({ onToas
     const s = await api.getSetup();
     setSetup(s);
     setChain(s.llm.chain);
+    setMainChain(s.llm.main_chain || []);
+    setFastChain(s.llm.fast_chain || []);
     const d: Record<string, Draft> = {};
     for (const p of s.llm.providers as Provider[]) {
-      d[p.name] = { api_key: '', clear_key: false, model: p.model, fast_model: p.fast_model, base_url: p.base_url, fallback_models: p.fallback_models };
+      d[p.name] = { api_key: '', clear_key: false, base_url: p.base_url };
     }
     setDrafts(d);
     setSup(s.supervisor);
@@ -87,14 +74,6 @@ export const SetupView: React.FC<{ onToast: (msg: string) => void }> = ({ onToas
   const providers: Provider[] = setup.llm.providers;
   const byName = Object.fromEntries(providers.map((p) => [p.name, p]));
   const setDraft = (name: string, patch: Partial<Draft>) => setDrafts((d) => ({ ...d, [name]: { ...d[name], ...patch } }));
-
-  const move = (i: number, dir: -1 | 1) => {
-    const j = i + dir;
-    if (j < 0 || j >= chain.length) return;
-    const c = [...chain];
-    [c[i], c[j]] = [c[j], c[i]];
-    setChain(c);
-  };
 
   const fetchModels = async (name: string) => {
     setBusy(`models:${name}`);
@@ -114,21 +93,18 @@ export const SetupView: React.FC<{ onToast: (msg: string) => void }> = ({ onToas
   const saveLlm = async () => {
     setBusy('save');
     try {
-      const body: any = { chain, providers: {} };
+      const body: any = { chain, main_chain: mainChain, fast_chain: fastChain, providers: {} };
       for (const p of providers) {
         const d = drafts[p.name];
         body.providers[p.name] = {
           api_key: d.api_key || null,
           clear_key: d.clear_key,
-          model: d.model === p.default_model ? '' : d.model,
-          fast_model: d.fast_model === p.default_fast_model ? '' : d.fast_model,
           base_url: d.base_url === p.default_base_url ? '' : d.base_url,
-          fallback_models: d.fallback_models,
         };
       }
       await api.saveLlmSetup(body);
       await load();
-      onToast('AI setup saved to .env and active now');
+      onToast('AI keys and cross-provider model chains saved to .env and active now');
     } catch (e) {
       onToast(`Could not save: ${(e as Error).message}`);
     } finally {
@@ -136,14 +112,15 @@ export const SetupView: React.FC<{ onToast: (msg: string) => void }> = ({ onToas
     }
   };
 
-  const test = async (name: string) => {
-    setBusy(`test:${name}`);
+  const test = async (name: string, model?: string) => {
+    const key = model ? `${name}:${model}` : name;
+    setBusy(`test:${key}`);
     try {
-      const r = await api.testLlm(name);
+      const r = await api.testLlm(name, model);
       const x = r.results[0];
-      setTestResults((t) => ({ ...t, [name]: x.ok ? `OK · ${x.model} · ${x.latency_ms}ms` : `FAILED · ${x.error}` }));
+      setTestResults((t) => ({ ...t, [key]: x.ok ? `OK · ${x.model} · ${x.latency_ms}ms` : `FAILED · ${x.error}` }));
     } catch (e) {
-      setTestResults((t) => ({ ...t, [name]: `FAILED · ${(e as Error).message}` }));
+      setTestResults((t) => ({ ...t, [key]: `FAILED · ${(e as Error).message}` }));
     } finally {
       setBusy('');
     }
@@ -188,20 +165,22 @@ export const SetupView: React.FC<{ onToast: (msg: string) => void }> = ({ onToas
   };
 
   const notInChain = providers.filter((p) => !chain.includes(p.name));
+  const availableProviders = chain.map((n) => byName[n]).filter(Boolean);
 
   return (
     <div className="space-y-3">
       <div className="rounded-lg p-3 flex justify-center bg-[#F4F7FB]">
         <img src={LOGO_FULL_URL} alt="Max Trading Agent" className="h-24 w-auto object-contain" />
       </div>
-      {/* AI PROVIDERS */}
+
+      {/* 1. API PROVIDERS (CREDENTIALS) */}
       <div className="cockpit-card rounded-lg p-3.5 space-y-3">
         <div className="flex items-center justify-between flex-wrap gap-2">
           <div>
-            <h3 className="text-xs font-bold uppercase tracking-wider">AI providers & fallback order</h3>
+            <h3 className="text-xs font-bold uppercase tracking-wider">1. AI API Providers (Keys &amp; Connection)</h3>
             <p className="text-xs text-[#8A9BB5] mt-0.5">
-              Tried top to bottom. If the main model fails, the fallback models of the same provider are tried first, then the next provider.
-              Keys are stored only in the local .env file.
+              Enter your API keys below, click <b>Check models</b> to load each provider&apos;s model list, then arrange cross-provider order in the
+              Main &amp; Fast Model chains below. Keys are stored only in local .env.
             </p>
           </div>
           <button onClick={saveLlm} disabled={busy === 'save'} className={`${btnCls} bg-[#3B82F6] text-white border-[#3B82F6]`}>
@@ -209,47 +188,40 @@ export const SetupView: React.FC<{ onToast: (msg: string) => void }> = ({ onToas
           </button>
         </div>
 
-        {chain.length === 0 && <div className="text-xs text-[#F59E0B]">No provider yet: the robot runs without AI (supervisor off).</div>}
+        {chain.length === 0 && <div className="text-xs text-[#F59E0B]">No API provider added yet: the robot runs without AI.</div>}
 
-        {chain.map((name, i) => {
-          const p = byName[name];
-          const d = drafts[name];
-          if (!p || !d) return null;
-          const opts = models[name] || [];
-          return (
-            <div key={name} className="cockpit-sub rounded-md p-3 space-y-2.5">
-              <div className="flex items-center justify-between gap-2 flex-wrap">
-                <div className="flex items-center gap-2">
-                  <span className="mono font-bold text-[#8A9BB5]">#{i + 1}</span>
-                  <span className="font-bold text-sm">{p.label}</span>
-                  <span
-                    className={`px-1.5 py-0.5 rounded mono font-bold text-xs ${p.configured ? 'bg-[#10B981]/15 text-[#10B981]' : 'bg-[#F59E0B]/15 text-[#F59E0B]'}`}
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-2.5">
+          {chain.map((name) => {
+            const p = byName[name];
+            const d = drafts[name];
+            if (!p || !d) return null;
+            return (
+              <div key={name} className="cockpit-sub rounded-md p-3 space-y-2 text-xs">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <div className="flex items-center gap-2">
+                    <span className="font-bold text-sm">{p.label}</span>
+                    <span
+                      className={`px-1.5 py-0.5 rounded mono font-bold text-[11px] ${p.configured ? 'bg-[#10B981]/15 text-[#10B981]' : 'bg-[#F59E0B]/15 text-[#F59E0B]'}`}
+                    >
+                      {p.configured ? 'READY' : 'NO KEY YET'}
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => setChain(chain.filter((n) => n !== name))}
+                    className={`${btnCls} border-[#EF4444]/40 text-[#EF4444]`}
+                    title="Remove provider"
                   >
-                    {p.configured ? 'READY' : 'NO KEY YET'}
-                  </span>
-                </div>
-                <div className="flex items-center gap-1">
-                  <button onClick={() => move(i, -1)} className={`${btnCls} border-[#1F2D45]`} title="Move up">
-                    <ArrowUp className="w-3.5 h-3.5" />
-                  </button>
-                  <button onClick={() => move(i, 1)} className={`${btnCls} border-[#1F2D45]`} title="Move down">
-                    <ArrowDown className="w-3.5 h-3.5" />
-                  </button>
-                  <button onClick={() => setChain(chain.filter((n) => n !== name))} className={`${btnCls} border-[#EF4444]/40 text-[#EF4444]`} title="Remove from the order">
                     <X className="w-3.5 h-3.5" />
                   </button>
                 </div>
-              </div>
-              {p.note && <div className="text-xs text-[#8A9BB5]">{p.note}</div>}
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 text-xs">
                 {p.needs_key && (
-                  <label className="space-y-1">
+                  <label className="space-y-1 block">
                     <span className="text-[#8A9BB5]">
                       API key {p.api_key_masked && <b className="mono text-[#E6EDF7]">saved {p.api_key_masked}</b>}{' '}
                       {p.key_url && (
                         <a href={p.key_url} target="_blank" rel="noreferrer" className="text-[#3B82F6] underline">
-                          get a key
+                          get key
                         </a>
                       )}
                     </span>
@@ -259,14 +231,14 @@ export const SetupView: React.FC<{ onToast: (msg: string) => void }> = ({ onToas
                         autoComplete="off"
                         value={d.api_key}
                         onChange={(e) => setDraft(name, { api_key: e.target.value, clear_key: false })}
-                        placeholder={p.api_key_masked ? 'leave empty = keep the saved key' : 'paste key here'}
+                        placeholder={p.api_key_masked ? 'leave empty = keep saved key' : 'paste API key here'}
                         className={inputCls}
                       />
                       {p.api_key_masked && (
                         <button
                           onClick={() => setDraft(name, { clear_key: !d.clear_key, api_key: '' })}
                           className={`${btnCls} ${d.clear_key ? 'bg-[#EF4444] text-white border-[#EF4444]' : 'border-[#1F2D45]'}`}
-                          title="Delete the key on save"
+                          title="Delete key on save"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
@@ -274,68 +246,38 @@ export const SetupView: React.FC<{ onToast: (msg: string) => void }> = ({ onToas
                     </div>
                   </label>
                 )}
+
                 {(LOCAL.has(name) || !p.needs_key) && (
-                  <label className="space-y-1">
+                  <label className="space-y-1 block">
                     <span className="text-[#8A9BB5]">Server address (base URL)</span>
                     <input value={d.base_url} onChange={(e) => setDraft(name, { base_url: e.target.value })} className={inputCls} />
                   </label>
                 )}
-                <div className="space-y-1 flex flex-col justify-end">
-                  <div className="flex gap-1.5">
-                    <button onClick={() => fetchModels(name)} disabled={busy === `models:${name}`} className={`${btnCls} border-[#06B6D4]/50 text-[#06B6D4]`}>
-                      {busy === `models:${name}` ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />} Check models
-                    </button>
-                    <button onClick={() => test(name)} disabled={busy === `test:${name}`} className={`${btnCls} border-[#10B981]/50 text-[#10B981]`}>
-                      {busy === `test:${name}` ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />} Test connection
-                    </button>
-                  </div>
-                  {testResults[name] && (
-                    <div className={`mono ${testResults[name].startsWith('OK') ? 'text-[#10B981]' : 'text-[#EF4444]'}`}>{testResults[name]}</div>
-                  )}
-                </div>
-              </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5 text-xs">
-                <label className="space-y-1">
-                  <span className="text-[#8A9BB5]">Main model (reflection)</span>
-                  <ModelPicker value={d.model} options={opts} onChange={(v) => setDraft(name, { model: v })} placeholder={p.default_model} />
-                </label>
-                <label className="space-y-1">
-                  <span className="text-[#8A9BB5]">Fast model (scalping supervisor)</span>
-                  <ModelPicker value={d.fast_model} options={opts} onChange={(v) => setDraft(name, { fast_model: v })} placeholder={p.default_fast_model} />
-                </label>
-                <div className="space-y-1">
-                  <span className="text-[#8A9BB5]">Fallback models (in order)</span>
-                  <div className="flex flex-wrap gap-1">
-                    {d.fallback_models.map((m) => (
-                      <span key={m} className="px-1.5 py-0.5 rounded bg-[#121B2B] border border-[#1F2D45] mono flex items-center gap-1">
-                        {m}
-                        <X
-                          className="w-3 h-3 cursor-pointer text-[#EF4444]"
-                          onClick={() => setDraft(name, { fallback_models: d.fallback_models.filter((x) => x !== m) })}
-                        />
-                      </span>
-                    ))}
-                  </div>
-                  <AddFallback
-                    options={opts.filter((m) => !d.fallback_models.includes(m) && m !== d.model && m !== d.fast_model)}
-                    onAdd={(m) => setDraft(name, { fallback_models: [...d.fallback_models, m] })}
-                  />
+                <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                  <button onClick={() => fetchModels(name)} disabled={busy === `models:${name}`} className={`${btnCls} border-[#06B6D4]/50 text-[#06B6D4]`}>
+                    {busy === `models:${name}` ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />} Check models
+                    {models[name]?.length ? ` (${models[name].length})` : ''}
+                  </button>
+                  <button onClick={() => test(name)} disabled={busy === `test:${name}`} className={`${btnCls} border-[#10B981]/50 text-[#10B981]`}>
+                    {busy === `test:${name}` ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />} Test key
+                  </button>
                 </div>
+                {testResults[name] && (
+                  <div className={`mono ${testResults[name].startsWith('OK') ? 'text-[#10B981]' : 'text-[#EF4444]'}`}>{testResults[name]}</div>
+                )}
+                {p.locked_by_environment.length > 0 && (
+                  <div className="text-[#F59E0B]">Locked by env vars ({p.locked_by_environment.join(', ')})</div>
+                )}
+                {p.stats?.last_error && <div className="text-[#EF4444] mono truncate">Last error: {p.stats.last_error}</div>}
               </div>
-              {p.locked_by_environment.length > 0 && (
-                <div className="text-xs text-[#F59E0B]">
-                  Set by system environment variables ({p.locked_by_environment.join(', ')}), so changes here do not apply to those.
-                </div>
-              )}
-              {p.stats?.last_error && <div className="text-xs text-[#EF4444] mono truncate">Last error: {p.stats.last_error}</div>}
-            </div>
-          );
-        })}
+            );
+          })}
+        </div>
 
         <div className="flex items-center gap-2 text-xs">
           <select value={addPick} onChange={(e) => setAddPick(e.target.value)} className={`${inputCls} max-w-xs`}>
-            <option value="">+ Add fallback provider...</option>
+            <option value="">+ Add API provider...</option>
             {notInChain.map((p) => (
               <option key={p.name} value={p.name}>
                 {p.label}
@@ -353,6 +295,34 @@ export const SetupView: React.FC<{ onToast: (msg: string) => void }> = ({ onToas
             <Plus className="w-3.5 h-3.5" /> Add
           </button>
         </div>
+      </div>
+
+      {/* 2. CROSS-PROVIDER MODEL CHAINS (MAIN & FAST) */}
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+        <ModelChainCard
+          title="2A. Main Model Chain (Reflection & Evolution)"
+          subtitle="Tried top to bottom across any provider for deep trade analysis every 4h."
+          entries={mainChain}
+          onChange={setMainChain}
+          providers={availableProviders}
+          modelsByProvider={models}
+          defaultKind="main"
+          busy={busy}
+          testResults={testResults}
+          onTest={test}
+        />
+        <ModelChainCard
+          title="2B. Fast Model Chain (AI Supervisor & Desk Brief)"
+          subtitle="Tried top to bottom across any provider for fast Desk Brief / veto calls."
+          entries={fastChain}
+          onChange={setFastChain}
+          providers={availableProviders}
+          modelsByProvider={models}
+          defaultKind="fast"
+          busy={busy}
+          testResults={testResults}
+          onTest={test}
+        />
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-3">
@@ -490,32 +460,144 @@ export const SetupView: React.FC<{ onToast: (msg: string) => void }> = ({ onToas
   );
 };
 
-const AddFallback: React.FC<{ options: string[]; onAdd: (m: string) => void }> = ({ options, onAdd }) => {
-  const [v, setV] = useState('');
+const ModelChainCard: React.FC<{
+  title: string;
+  subtitle: string;
+  entries: string[];
+  onChange: (next: string[]) => void;
+  providers: Provider[];
+  modelsByProvider: Record<string, string[]>;
+  defaultKind: 'main' | 'fast';
+  busy: string;
+  testResults: Record<string, string>;
+  onTest: (provider: string, model: string) => void;
+}> = ({ title, subtitle, entries, onChange, providers, modelsByProvider, defaultKind, busy, testResults, onTest }) => {
+  const [pickProv, setPickProv] = useState(providers[0]?.name || '');
+  const [pickModel, setPickModel] = useState('');
+
+  useEffect(() => {
+    if (!pickProv && providers.length) setPickProv(providers[0].name);
+  }, [providers, pickProv]);
+
+  const activeProv = providers.find((p) => p.name === pickProv) || providers[0];
+  const opts = activeProv ? modelsByProvider[activeProv.name] || [] : [];
+
+  const move = (i: number, dir: -1 | 1) => {
+    const j = i + dir;
+    if (j < 0 || j >= entries.length) return;
+    const next = [...entries];
+    [next[i], next[j]] = [next[j], next[i]];
+    onChange(next);
+  };
+
+  const addEntry = () => {
+    if (!activeProv) return;
+    const m = (pickModel.trim() || (defaultKind === 'fast' ? activeProv.fast_model : activeProv.model)).trim();
+    if (!m) return;
+    const item = `${activeProv.name}:${m}`;
+    if (!entries.includes(item)) onChange([...entries, item]);
+    setPickModel('');
+  };
+
   return (
-    <div className="flex gap-1">
-      {options.length ? (
-        <select value={v} onChange={(e) => setV(e.target.value)} className={inputCls}>
-          <option value="">pick a model...</option>
-          {options.map((m) => (
-            <option key={m} value={m}>
-              {m}
+    <div className="cockpit-card rounded-lg p-3.5 space-y-2.5 text-xs">
+      <div>
+        <h3 className="font-bold uppercase tracking-wider">{title}</h3>
+        <p className="text-[#8A9BB5] mt-0.5">{subtitle}</p>
+      </div>
+
+      {entries.length === 0 ? (
+        <div className="cockpit-sub rounded-md p-2.5 text-[#8A9BB5]">No models in chain yet — add one below, then click Save AI.</div>
+      ) : (
+        <div className="space-y-1.5">
+          {entries.map((item, i) => {
+            const idx = item.indexOf(':');
+            const prov = idx >= 0 ? item.slice(0, idx) : item;
+            const mod = idx >= 0 ? item.slice(idx + 1) : '';
+            const res = testResults[item];
+            return (
+              <div key={item} className="cockpit-sub rounded-md px-2.5 py-2 space-y-1">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="mono font-bold text-[#8A9BB5] shrink-0">#{i + 1}</span>
+                    <span className="px-1.5 py-0.5 rounded bg-[#3B82F6]/15 text-[#3B82F6] mono font-bold uppercase text-[10px] shrink-0">
+                      {prov}
+                    </span>
+                    <span className="mono font-bold truncate" title={mod}>
+                      {mod}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      onClick={() => onTest(prov, mod)}
+                      disabled={busy === `test:${item}`}
+                      className={`${btnCls} py-1 px-2 border-[#10B981]/40 text-[#10B981]`}
+                      title="Test this provider:model"
+                    >
+                      {busy === `test:${item}` ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+                    </button>
+                    <button onClick={() => move(i, -1)} className={`${btnCls} py-1 px-1.5 border-[#1F2D45]`} title="Move up">
+                      <ArrowUp className="w-3 h-3" />
+                    </button>
+                    <button onClick={() => move(i, 1)} className={`${btnCls} py-1 px-1.5 border-[#1F2D45]`} title="Move down">
+                      <ArrowDown className="w-3 h-3" />
+                    </button>
+                    <button
+                      onClick={() => onChange(entries.filter((x) => x !== item))}
+                      className={`${btnCls} py-1 px-1.5 border-[#EF4444]/40 text-[#EF4444]`}
+                      title="Remove"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </div>
+                </div>
+                {res && <div className={`mono text-[11px] ${res.startsWith('OK') ? 'text-[#10B981]' : 'text-[#EF4444]'}`}>{res}</div>}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 sm:grid-cols-12 gap-1.5 pt-1">
+        <select
+          value={activeProv?.name || ''}
+          onChange={(e) => {
+            setPickProv(e.target.value);
+            setPickModel('');
+          }}
+          className={`${inputCls} sm:col-span-4`}
+        >
+          {providers.map((p) => (
+            <option key={p.name} value={p.name}>
+              {p.name}
             </option>
           ))}
         </select>
-      ) : (
-        <input value={v} onChange={(e) => setV(e.target.value)} placeholder="click Check models, or type" className={inputCls} />
-      )}
-      <button
-        disabled={!v.trim()}
-        onClick={() => {
-          onAdd(v.trim());
-          setV('');
-        }}
-        className={`${btnCls} border-[#3B82F6]/50 text-[#3B82F6]`}
-      >
-        <Plus className="w-3.5 h-3.5" />
-      </button>
+        {opts.length > 0 ? (
+          <select value={pickModel} onChange={(e) => setPickModel(e.target.value)} className={`${inputCls} sm:col-span-6`}>
+            <option value="">pick fetched model...</option>
+            {opts.map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <input
+            value={pickModel}
+            onChange={(e) => setPickModel(e.target.value)}
+            placeholder={activeProv ? (defaultKind === 'fast' ? activeProv.fast_model : activeProv.model) : 'model id'}
+            className={`${inputCls} sm:col-span-6`}
+          />
+        )}
+        <button
+          disabled={!activeProv}
+          onClick={addEntry}
+          className={`${btnCls} sm:col-span-2 justify-center border-[#3B82F6]/50 text-[#3B82F6]`}
+        >
+          <Plus className="w-3.5 h-3.5" /> Add
+        </button>
+      </div>
     </div>
   );
 };

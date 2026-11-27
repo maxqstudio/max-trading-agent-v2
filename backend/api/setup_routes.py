@@ -22,7 +22,7 @@ from dataclasses import replace
 from backend.llm.base import LLMRequest
 from backend.llm.models_catalog import ModelListError, list_models
 from backend.llm.presets import DEFAULT_CHAIN, PRESETS
-from backend.llm.settings import _merged_env, load_chain, parse_chain, resolve_provider
+from backend.llm.settings import _merged_env, load_chain, load_model_chains, parse_chain, parse_model_chain, resolve_provider
 
 
 class ProviderUpdate(BaseModel):
@@ -37,10 +37,13 @@ class ProviderUpdate(BaseModel):
 class LLMSetupRequest(BaseModel):
     chain: list[str] = Field(default_factory=list, max_length=12)
     providers: dict[str, ProviderUpdate] = Field(default_factory=dict)
+    main_chain: list[str] | None = Field(default=None, max_length=20)
+    fast_chain: list[str] | None = Field(default=None, max_length=20)
 
 
 class LLMTestRequest(BaseModel):
     provider: str | None = None
+    model: str | None = Field(default=None, max_length=200)
 
 
 class ModelListRequest(BaseModel):
@@ -137,8 +140,16 @@ def register_setup_routes(api: APIRouter, orch: TradingOrchestrator, env_path: s
                     f for f in ("API_KEY", "MODEL", "FAST_MODEL", "BASE_URL", "FALLBACK_MODELS") if f"{up}_{f}" in os.environ
                 ],
             })
+        explicit_main = [f"{p}:{m}" for p, m in parse_model_chain(env.get("LLM_MAIN_CHAIN"))]
+        explicit_fast = [f"{p}:{m}" for p, m in parse_model_chain(env.get("LLM_FAST_CHAIN"))]
+        # If no explicit cross-provider chain saved yet, derive initial display from configured providers
+        by_name = {p["name"]: p for p in providers}
+        default_main = [f"{n}:{by_name[n]['model']}" for n in chain if n in by_name and by_name[n]["configured"]]
+        default_fast = [f"{n}:{by_name[n]['fast_model']}" for n in chain if n in by_name and by_name[n]["configured"]]
         return {
             "chain": chain,
+            "main_chain": explicit_main or default_main,
+            "fast_chain": explicit_fast or default_fast,
             "default_chain": list(DEFAULT_CHAIN),
             "chain_locked_by_environment": "LLM_PROVIDER_CHAIN" in os.environ,
             "providers": providers,
@@ -222,11 +233,26 @@ def register_setup_routes(api: APIRouter, orch: TradingOrchestrator, env_path: s
             if pu.fallback_models is not None:
                 fb = [m.strip() for m in pu.fallback_models if m.strip()]
                 updates[f"{up}_FALLBACK_MODELS"] = ",".join(dict.fromkeys(fb)) or None
+        for env_key, raw_list in (("LLM_MAIN_CHAIN", req.main_chain), ("LLM_FAST_CHAIN", req.fast_chain)):
+            if raw_list is None:
+                continue
+            cleaned: list[str] = []
+            for entry in raw_list:
+                if ":" not in entry:
+                    raise HTTPException(status_code=400, detail=f"Invalid model chain entry: {entry!r} (expected provider:model)")
+                p_name, m_id = entry.split(":", 1)
+                p_name, m_id = p_name.strip().lower(), m_id.strip()
+                if p_name not in PRESETS:
+                    raise HTTPException(status_code=400, detail=f"Unknown provider in chain: {p_name}")
+                if m_id and f"{p_name}:{m_id}" not in cleaned:
+                    cleaned.append(f"{p_name}:{m_id}")
+            updates[env_key] = ",".join(cleaned) if cleaned else None
         try:
             update_env_file(env_path, updates)
         except EnvWriteError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        orch.llm.reload(load_chain(env_path))
+        mc, fc = load_model_chains(env_path)
+        orch.llm.reload(load_chain(env_path), main_chain=mc, fast_chain=fc)
         return {"saved": sorted(k for k in updates if not k.endswith("_API_KEY")) + (
             ["API key(s)"] if any(k.endswith("_API_KEY") for k in updates) else []), "llm": llm_view()}
 
@@ -254,6 +280,8 @@ def register_setup_routes(api: APIRouter, orch: TradingOrchestrator, env_path: s
             rp = resolve_provider(req.provider, _merged_env(env_path)) if req.provider in PRESETS else None
             if rp is None:
                 raise HTTPException(status_code=400, detail="Unknown provider")
+            if req.model and req.model.strip():
+                rp = replace(rp, model=req.model.strip(), fast_model=req.model.strip())
             targets = [rp]
         results = []
         for rp in targets:

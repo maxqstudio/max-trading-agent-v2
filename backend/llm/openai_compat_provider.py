@@ -33,6 +33,11 @@ def _extract_json(text: str) -> dict[str, Any]:
     return data
 
 
+def _uses_max_completion_tokens(provider_name: str, model: str) -> bool:
+    m = model.strip().lower()
+    return provider_name == "openai" or m.startswith(("o1", "o3", "o4", "gpt-5", "gpt-6"))
+
+
 class OpenAICompatProvider:
     def __init__(self, rp: ResolvedProvider, transport: httpx.AsyncBaseTransport | None = None) -> None:
         self.rp = rp
@@ -42,7 +47,11 @@ class OpenAICompatProvider:
     async def complete(self, req: LLMRequest) -> LLMResult:
         model = self.rp.fast_model if req.fast else self.rp.model
         system = req.system
-        body: dict[str, Any] = {"model": model, "max_tokens": req.max_tokens}
+        use_mct = _uses_max_completion_tokens(self.rp.name, model)
+        body: dict[str, Any] = {
+            "model": model,
+            ("max_completion_tokens" if use_mct else "max_tokens"): req.max_tokens,
+        }
         mode = self.rp.preset.json_mode
         if mode == "json_schema":
             body["response_format"] = {
@@ -63,6 +72,17 @@ class OpenAICompatProvider:
         try:
             async with httpx.AsyncClient(timeout=req.timeout_s, transport=self._transport) as client:
                 resp = await client.post(f"{self.rp.base_url}/chat/completions", headers=headers, json=body)
+                # Auto-retry once if an OpenAI-compatible model rejects max_tokens vs max_completion_tokens
+                if resp.status_code == 400:
+                    err_txt = resp.text.lower()
+                    if not use_mct and "max_completion_tokens" in err_txt and "max_tokens" in body:
+                        body.pop("max_tokens", None)
+                        body["max_completion_tokens"] = req.max_tokens
+                        resp = await client.post(f"{self.rp.base_url}/chat/completions", headers=headers, json=body)
+                    elif use_mct and "max_completion_tokens" in err_txt and "max_completion_tokens" in body:
+                        body.pop("max_completion_tokens", None)
+                        body["max_tokens"] = req.max_tokens
+                        resp = await client.post(f"{self.rp.base_url}/chat/completions", headers=headers, json=body)
         except httpx.TimeoutException as exc:
             raise LLMError(f"timeout after {req.timeout_s:.1f}s") from exc
         except httpx.HTTPError as exc:

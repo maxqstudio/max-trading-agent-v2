@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from dotenv import dotenv_values
@@ -92,3 +92,40 @@ def load_chain(env_file: str | Path | None = ".env", overrides: dict[str, str] |
         env.update(overrides)
     resolved = [resolve_provider(n, env) for n in parse_chain(env)]
     return [r for r in resolved if r is not None]
+
+
+def parse_model_chain(raw: str | None) -> list[tuple[str, str]]:
+    """Parse cross-provider model chains like ``openai:gpt-6-luna,gemini:gemini-2.5-pro``."""
+    if not raw or raw.strip().lower() in _DISABLED:
+        return []
+    out: list[tuple[str, str]] = []
+    for item in raw.split(","):
+        part = item.strip()
+        if ":" not in part:
+            continue
+        prov, model = part.split(":", 1)
+        prov = prov.strip().lower()
+        model = model.strip()
+        if prov in PRESETS and model and (prov, model) not in out:
+            out.append((prov, model))
+    return out
+
+
+def load_model_chains(
+    env_file: str | Path | None = ".env",
+    overrides: dict[str, str] | None = None,
+) -> tuple[list[ResolvedProvider], list[ResolvedProvider]]:
+    """Load optional cross-provider Main and Fast model chains from LLM_MAIN_CHAIN / LLM_FAST_CHAIN."""
+    env = _merged_env(env_file)
+    if overrides:
+        env.update(overrides)
+
+    def _resolve_entries(key: str) -> list[ResolvedProvider]:
+        items: list[ResolvedProvider] = []
+        for prov, model in parse_model_chain(env.get(key)):
+            rp = resolve_provider(prov, env)
+            if rp is not None:
+                items.append(replace(rp, model=model, fast_model=model, fallback_models=()))
+        return items
+
+    return _resolve_entries("LLM_MAIN_CHAIN"), _resolve_entries("LLM_FAST_CHAIN")

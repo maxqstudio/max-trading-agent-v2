@@ -607,3 +607,80 @@ async def test_shadow_challenger_respects_ai_supervisor_brief_and_p0_filters(tmp
         assert orch.shadow_equity == cfg.paper.start_equity and orch.shadow_raw_equity == cfg.paper.start_equity
     finally:
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_openai_max_completion_tokens_and_cross_provider_chains():
+    import httpx
+    from backend.llm.openai_compat_provider import OpenAICompatProvider
+    from backend.llm.settings import load_model_chains
+
+    # 1. OpenAI gpt-6-luna must send max_completion_tokens (NOT max_tokens!)
+    seen_bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        seen_bodies.append(_json.loads(request.content.decode()))
+        return httpx.Response(
+            200,
+            json={"model": "gpt-6-luna", "choices": [{"message": {"content": '{"ok": true}'}, "finish_reason": "stop"}]},
+        )
+
+    rp_oai = ResolvedProvider(
+        preset=PRESETS["openai"],
+        api_key="test-key",
+        base_url="https://api.openai.com/v1",
+        model="gpt-6-luna",
+        fast_model="gpt-6-luna",
+    )
+    prov = OpenAICompatProvider(rp_oai, transport=httpx.MockTransport(handler))
+    res = await prov.complete(
+        LLMRequest(
+            task="ping",
+            system="sys",
+            user="hi",
+            schema={"type": "object", "additionalProperties": False, "required": ["ok"], "properties": {"ok": {"type": "boolean"}}},
+            max_tokens=256,
+        )
+    )
+    assert res.data == {"ok": True}
+    assert "max_completion_tokens" in seen_bodies[0]
+    assert "max_tokens" not in seen_bodies[0]
+
+    # 2. Cross-provider Main & Fast chains route independently across providers and fall back cleanly
+    mc, fc = load_model_chains(
+        env_file=None,
+        overrides={
+            "OPENAI_API_KEY": "k1",
+            "GEMINI_API_KEY": "k2",
+            "LLM_MAIN_CHAIN": "openai:gpt-6-luna,gemini:gemini-2.5-pro",
+            "LLM_FAST_CHAIN": "gemini:gemini-3.5-flash-lite,openai:gpt-5-mini",
+        },
+    )
+    assert [(r.name, r.model) for r in mc] == [("openai", "gpt-6-luna"), ("gemini", "gemini-2.5-pro")]
+    assert [(r.name, r.fast_model) for r in fc] == [("gemini", "gemini-3.5-flash-lite"), ("openai", "gpt-5-mini")]
+
+    called: list[str] = []
+
+    class _MockProv:
+        def __init__(self, rp: ResolvedProvider) -> None:
+            self.rp = rp
+            self.name = rp.name
+
+        async def complete(self, req: LLMRequest) -> LLMResult:
+            m = self.rp.fast_model if req.fast else self.rp.model
+            called.append(f"{self.rp.name}:{m}")
+            if m == "gpt-6-luna":
+                raise RuntimeError("simulated outage")
+            return LLMResult(data={"ok": True}, provider=self.rp.name, model=m, latency_ms=10.0)
+
+    router = LLMRouter(resolved=[], main_chain=mc, fast_chain=fc, factory=lambda r: _MockProv(r))
+    ping_main = LLMRequest(task="reflection", system="s", user="u", schema={}, fast=False)
+    ping_fast = LLMRequest(task="supervisor", system="s", user="u", schema={}, fast=True)
+
+    r_main, _ = await router.complete(ping_main)
+    r_fast, _ = await router.complete(ping_fast)
+    assert r_main.provider == "gemini" and r_main.model == "gemini-2.5-pro"
+    assert r_fast.provider == "gemini" and r_fast.model == "gemini-3.5-flash-lite"
+    assert called == ["openai:gpt-6-luna", "gemini:gemini-2.5-pro", "gemini:gemini-3.5-flash-lite"]

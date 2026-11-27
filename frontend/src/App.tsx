@@ -268,12 +268,15 @@ export default function App() {
                 </span>
               </div>
               <div className="flex justify-between"><span className="text-[#8A9BB5]">AI Scans</span><span className="mono font-bold">{state?.scans_count ?? 0}</span></div>
-              <div className="flex justify-between"><span className="text-[#8A9BB5]">Paper Normal</span><span className="mono font-bold text-[#F59E0B]">${(state?.paper?.books?.normal?.equity ?? state?.paper?.equity ?? 10000).toFixed(0)}</span></div>
-              <div className="flex justify-between"><span className="text-[#8A9BB5]">Paper Hit &amp; Run</span><span className="mono font-bold text-[#EC4899]">${(state?.paper?.books?.hitrun?.equity ?? 10000).toFixed(0)}</span></div>
-              <div className="flex justify-between" title="Every risk-approved setup (Normal exit), ignoring filters and AI Supervisor"><span className="text-[#8A9BB5]">Paper No Veto</span><span className="mono font-bold text-[#14B8A6]">${(state?.paper?.books?.raw?.equity ?? 10000).toFixed(0)}</span></div>
-              <div className="flex justify-between" title="Every risk-approved setup (Hit & Run exit), ignoring filters and AI Supervisor"><span className="text-[#8A9BB5]">Paper No Veto H&amp;R</span><span className="mono font-bold text-[#38BDF8]">${(state?.paper?.books?.raw_hitrun?.equity ?? 10000).toFixed(0)}</span></div>
-              <div className="flex justify-between" title="Evolved challenger WITH P0 filters and AI Supervisor veto"><span className="text-[#8A9BB5]">Challenger (AI Veto)</span><span className="mono font-bold text-[#8B5CF6]">${(state?.shadow_equity ?? 10000).toFixed(0)}</span></div>
-              <div className="flex justify-between" title="Pure evolved challenger WITHOUT filters or AI Supervisor veto"><span className="text-[#8A9BB5]">Challenger (Raw)</span><span className="mono font-bold text-[#A3E635]">${(state?.shadow_raw_equity ?? 10000).toFixed(0)}</span></div>
+              <div className="pt-1 border-t border-[#1F2D45]/70 text-[10px] uppercase tracking-wider text-[#64748B] font-bold">Paper · AI Supervised</div>
+              <div className="flex justify-between"><span className="text-[#8A9BB5]">Normal</span><span className="mono font-bold text-[#F59E0B]">${(state?.paper?.books?.normal?.equity ?? state?.paper?.equity ?? 10000).toFixed(0)}</span></div>
+              <div className="flex justify-between"><span className="text-[#8A9BB5]">Hit &amp; Run</span><span className="mono font-bold text-[#EC4899]">${(state?.paper?.books?.hitrun?.equity ?? 10000).toFixed(0)}</span></div>
+              <div className="pt-1 border-t border-[#1F2D45]/70 text-[10px] uppercase tracking-wider text-[#64748B] font-bold">Paper · No Veto</div>
+              <div className="flex justify-between" title="Every risk-approved setup (Normal exit), ignoring filters and AI Supervisor"><span className="text-[#8A9BB5]">No Veto</span><span className="mono font-bold text-[#14B8A6]">${(state?.paper?.books?.raw?.equity ?? 10000).toFixed(0)}</span></div>
+              <div className="flex justify-between" title="Every risk-approved setup (Hit & Run exit), ignoring filters and AI Supervisor"><span className="text-[#8A9BB5]">No Veto H&amp;R</span><span className="mono font-bold text-[#38BDF8]">${(state?.paper?.books?.raw_hitrun?.equity ?? 10000).toFixed(0)}</span></div>
+              <div className="pt-1 border-t border-[#1F2D45]/70 text-[10px] uppercase tracking-wider text-[#64748B] font-bold">Evolution · Challenger</div>
+              <div className="flex justify-between" title="Evolved challenger WITH P0 filters and AI Supervisor veto"><span className="text-[#8A9BB5]">AI Veto</span><span className="mono font-bold text-[#8B5CF6]">${(state?.shadow_equity ?? 10000).toFixed(0)}</span></div>
+              <div className="flex justify-between" title="Pure evolved challenger WITHOUT filters or AI Supervisor veto"><span className="text-[#8A9BB5]">Raw</span><span className="mono font-bold text-[#A3E635]">${(state?.shadow_raw_equity ?? 10000).toFixed(0)}</span></div>
             </div>
           </div>
         </aside>
