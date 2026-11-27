@@ -112,8 +112,8 @@ export const api = {
   saveLlmSetup: (body: Record<string, unknown>) => req<any>('/api/setup/llm', { method: 'PUT', body: JSON.stringify(body) }),
   listModels: (provider: string, api_key = '', base_url = '') =>
     req<any>('/api/setup/llm/models', { method: 'POST', body: JSON.stringify({ provider, api_key, base_url }) }),
-  testLlm: (provider?: string, model?: string) =>
-    req<any>('/api/setup/llm/test', { method: 'POST', body: JSON.stringify({ provider, model }) }),
+  testLlm: (provider?: string, model?: string, api_key = '', base_url = '') =>
+    req<any>('/api/setup/llm/test', { method: 'POST', body: JSON.stringify({ provider, model, api_key: api_key || undefined, base_url: base_url || undefined }) }),
   saveSupervisorSetup: (body: Record<string, unknown>) =>
     req<any>('/api/setup/supervisor', { method: 'PUT', body: JSON.stringify(body) }),
   refreshSupervisorBrief: () => req<any>('/api/setup/supervisor/brief', { method: 'POST' }),

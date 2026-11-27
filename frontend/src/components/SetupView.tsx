@@ -116,7 +116,8 @@ export const SetupView: React.FC<{ onToast: (msg: string) => void }> = ({ onToas
     const key = model ? `${name}:${model}` : name;
     setBusy(`test:${key}`);
     try {
-      const r = await api.testLlm(name, model);
+      const d = drafts[name];
+      const r = await api.testLlm(name, model, d?.api_key || '', LOCAL.has(name) ? d?.base_url || '' : '');
       const x = r.results[0];
       setTestResults((t) => ({ ...t, [key]: x.ok ? `OK · ${x.model} · ${x.latency_ms}ms` : `FAILED · ${x.error}` }));
     } catch (e) {
@@ -310,6 +311,7 @@ export const SetupView: React.FC<{ onToast: (msg: string) => void }> = ({ onToas
           busy={busy}
           testResults={testResults}
           onTest={test}
+          onSave={saveLlm}
         />
         <ModelChainCard
           title="2B. Fast Model Chain (AI Supervisor & Desk Brief)"
@@ -322,6 +324,7 @@ export const SetupView: React.FC<{ onToast: (msg: string) => void }> = ({ onToas
           busy={busy}
           testResults={testResults}
           onTest={test}
+          onSave={saveLlm}
         />
       </div>
 
@@ -471,7 +474,8 @@ const ModelChainCard: React.FC<{
   busy: string;
   testResults: Record<string, string>;
   onTest: (provider: string, model: string) => void;
-}> = ({ title, subtitle, entries, onChange, providers, modelsByProvider, defaultKind, busy, testResults, onTest }) => {
+  onSave: () => void;
+}> = ({ title, subtitle, entries, onChange, providers, modelsByProvider, defaultKind, busy, testResults, onTest, onSave }) => {
   const [pickProv, setPickProv] = useState(providers[0]?.name || '');
   const [pickModel, setPickModel] = useState('');
 
@@ -501,9 +505,14 @@ const ModelChainCard: React.FC<{
 
   return (
     <div className="cockpit-card rounded-lg p-3.5 space-y-2.5 text-xs">
-      <div>
-        <h3 className="font-bold uppercase tracking-wider">{title}</h3>
-        <p className="text-[#8A9BB5] mt-0.5">{subtitle}</p>
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <h3 className="font-bold uppercase tracking-wider">{title}</h3>
+          <p className="text-[#8A9BB5] mt-0.5">{subtitle}</p>
+        </div>
+        <button onClick={onSave} disabled={busy === 'save'} className={`${btnCls} bg-[#3B82F6] text-white border-[#3B82F6] shrink-0`}>
+          {busy === 'save' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />} Save
+        </button>
       </div>
 
       {entries.length === 0 ? (

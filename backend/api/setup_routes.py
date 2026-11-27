@@ -44,6 +44,8 @@ class LLMSetupRequest(BaseModel):
 class LLMTestRequest(BaseModel):
     provider: str | None = None
     model: str | None = Field(default=None, max_length=200)
+    api_key: str | None = Field(default=None, max_length=500)  # optional: test a key before saving it
+    base_url: str | None = Field(default=None, max_length=300)
 
 
 class ModelListRequest(BaseModel):
@@ -280,6 +282,10 @@ def register_setup_routes(api: APIRouter, orch: TradingOrchestrator, env_path: s
             rp = resolve_provider(req.provider, _merged_env(env_path)) if req.provider in PRESETS else None
             if rp is None:
                 raise HTTPException(status_code=400, detail="Unknown provider")
+            if req.api_key and req.api_key.strip():
+                rp = replace(rp, api_key=req.api_key.strip())
+            if req.base_url and req.base_url.strip():
+                rp = replace(rp, base_url=req.base_url.strip().rstrip("/"))
             if req.model and req.model.strip():
                 rp = replace(rp, model=req.model.strip(), fast_model=req.model.strip())
             targets = [rp]
