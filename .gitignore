@@ -1,4 +1,5 @@
 # Secrets & local env
+config/local.yaml
 .env
 .env.*
 !.env.example

@@ -20,6 +20,7 @@ class ResolvedProvider:
     base_url: str
     model: str
     fast_model: str
+    fallback_models: tuple[str, ...] = ()  # same provider, tried in order when the main model fails
 
     @property
     def name(self) -> str:
@@ -55,6 +56,9 @@ def resolve_provider(name: str, env: dict[str, str]) -> ResolvedProvider | None:
         base_url=(env.get(f"{up}_BASE_URL", "").strip() or preset.base_url).rstrip("/"),
         model=model,
         fast_model=env.get(f"{up}_FAST_MODEL", "").strip() or preset.fast_model or model,
+        fallback_models=tuple(
+            m.strip() for m in env.get(f"{up}_FALLBACK_MODELS", "").split(",") if m.strip()
+        ),
     )
 
 

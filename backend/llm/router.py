@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +47,11 @@ class LLMRouter:
     def from_env(cls, env_file: str | Path | None = ".env") -> "LLMRouter":
         return cls(resolved=load_chain(env_file))
 
+    def reload(self, resolved: list[ResolvedProvider]) -> None:
+        """Swap the provider chain in place (after a settings change); stats are kept."""
+        self.resolved = resolved
+        self._cache.clear()
+
     @property
     def active(self) -> list[ResolvedProvider]:
         return [r for r in self.resolved if r.configured]
@@ -56,14 +61,25 @@ class LLMRouter:
         return bool(self.active)
 
     def _provider(self, rp: ResolvedProvider) -> Provider:
-        if rp.name not in self._cache:
-            self._cache[rp.name] = self.factory(rp)
-        return self._cache[rp.name]
+        key = f"{rp.name}|{rp.model}|{rp.fast_model}"
+        if key not in self._cache:
+            self._cache[key] = self.factory(rp)
+        return self._cache[key]
+
+    @staticmethod
+    def _attempts(rp: ResolvedProvider) -> list[ResolvedProvider]:
+        """The provider with its own model first, then each fallback model of the same provider."""
+        out = [rp]
+        for m in rp.fallback_models:
+            if m not in (rp.model, rp.fast_model):
+                out.append(replace(rp, model=m, fast_model=m, fallback_models=()))
+        return out
 
     async def complete(self, req: LLMRequest, validate: Callable[[dict[str, Any]], Any] | None = None) -> tuple[LLMResult, Any]:
         """Return (result, validated) from the first provider whose answer passes ``validate``."""
         errors: list[str] = []
-        for rp in self.active:
+        for attempt in (a for rp in self.active for a in self._attempts(rp)):
+            rp = attempt
             st = self.stats.setdefault(rp.name, ProviderStats())
             st.calls += 1
             try:
@@ -72,8 +88,9 @@ class LLMRouter:
             except Exception as exc:  # LLMError, schema validation errors, anything provider-side
                 st.failures += 1
                 st.last_error = str(exc)[:300]
-                errors.append(f"{rp.name}: {st.last_error}")
-                log.warning("LLM provider %s failed for %s: %s", rp.name, req.task, st.last_error)
+                label = f"{rp.name}:{rp.fast_model if req.fast else rp.model}"
+                errors.append(f"{label}: {st.last_error}")
+                log.warning("LLM %s failed for %s: %s", label, req.task, st.last_error)
                 continue
             st.last_error = ""
             st.last_latency_ms = res.latency_ms
@@ -95,6 +112,7 @@ class LLMRouter:
                     "configured": r.configured,
                     "model": r.model,
                     "fast_model": r.fast_model,
+                    "fallback_models": list(r.fallback_models),
                     "base_url": r.base_url,
                     "api_key": r.masked_key(),
                     "stats": vars_or_empty(self.stats.get(r.name)),

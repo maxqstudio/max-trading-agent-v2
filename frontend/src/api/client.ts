@@ -67,7 +67,14 @@ async function req<T>(url: string, init?: RequestInit, retried = false): Promise
   }
   if (!res.ok) {
     const txt = await res.text();
-    throw new Error(txt || `HTTP ${res.status}`);
+    let msg = txt;
+    try {
+      const j = JSON.parse(txt);
+      msg = typeof j.detail === 'string' ? j.detail : JSON.stringify(j.detail ?? j);
+    } catch {
+      // plain text
+    }
+    throw new Error(msg || `HTTP ${res.status}`);
   }
   return res.json() as Promise<T>;
 }
@@ -95,6 +102,13 @@ export const api = {
   killSwitch: (mode: 'SOFT_PAUSE' | 'FLATTEN_KILL', confirm_code = '') =>
     req<any>('/api/control/kill', { method: 'POST', body: JSON.stringify({ mode, confirm_code }) }),
   closePosition: (ticket: number) => req<any>(`/api/control/close/${ticket}`, { method: 'POST' }),
+  getSetup: () => req<any>('/api/setup'),
+  saveLlmSetup: (body: Record<string, unknown>) => req<any>('/api/setup/llm', { method: 'PUT', body: JSON.stringify(body) }),
+  listModels: (provider: string, api_key = '', base_url = '') =>
+    req<any>('/api/setup/llm/models', { method: 'POST', body: JSON.stringify({ provider, api_key, base_url }) }),
+  testLlm: (provider?: string) => req<any>('/api/setup/llm/test', { method: 'POST', body: JSON.stringify({ provider }) }),
+  saveSupervisorSetup: (body: Record<string, unknown>) =>
+    req<any>('/api/setup/supervisor', { method: 'PUT', body: JSON.stringify(body) }),
   triggerDemoSignal: (symbol: string) =>
     req<any>(`/api/demo/signal?symbol=${encodeURIComponent(symbol)}`, { method: 'POST' }),
 };

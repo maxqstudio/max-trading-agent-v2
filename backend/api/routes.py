@@ -340,6 +340,9 @@ def create_app(orchestrator: TradingOrchestrator) -> FastAPI:
     async def demo_signal(symbol: str = "XAUUSD") -> dict[str, Any]:
         return await orchestrator.force_demo_signal(symbol)
 
+    from backend.api.setup_routes import register_setup_routes
+
+    register_setup_routes(api, orchestrator)
     app.include_router(public)
     app.include_router(bridge)
     app.include_router(api)

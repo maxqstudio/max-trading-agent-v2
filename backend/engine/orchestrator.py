@@ -217,6 +217,23 @@ class TradingOrchestrator:
             except Exception:
                 pass
 
+    def llm_brief(self) -> dict[str, Any]:
+        """Which AI answers right now (first configured provider in the chain) and today's spend."""
+        active = self.llm.active
+        first = active[0] if active else None
+        return {
+            "enabled": bool(active),
+            "provider": first.name if first else "",
+            "label": first.preset.label if first else "Deterministic (no AI key)",
+            "model": first.model if first else "",
+            "fast_model": first.fast_model if first else "",
+            "fallbacks": [r.name for r in active[1:]],
+            "total_cost_usd": round(sum(st.total_cost_usd for st in self.llm.stats.values()), 4),
+        }
+
+    def apply_supervisor_config(self) -> None:
+        self.supervisor.settings = _supervisor_settings(self.config)
+
     def ensure_symbol(self, sym: str) -> None:
         """Start tracking a symbol the EA reports that is not in the config watchlist.
 
@@ -536,6 +553,8 @@ class TradingOrchestrator:
     ) -> None:
         try:
             verdict = await self.supervisor.review(ctx)
+            if self.supervisor.last:
+                self.supervisor.last["symbol"] = sym
             note = f" | Supervisor {verdict.decision} ({verdict.provider or 'policy'}, {verdict.latency_ms:.0f}ms): {verdict.reason}"
             if not verdict.allows_entry:
                 await self._log_decision(
@@ -1066,6 +1085,7 @@ class TradingOrchestrator:
             "kill_reason": self.kill_state.reason if self.risk.killed else "",
             "live_trading_enabled": self.env.allow_live_trading,
             "supervisor": self.supervisor.status(),
+            "llm": self.llm_brief(),
             "entry_block_reason": self.entry_block_reason(),
             "evolution_running": self.evolution_running,
             "bridge_connected": stale_sec < 6.0,

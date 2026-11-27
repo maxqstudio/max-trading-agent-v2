@@ -168,6 +168,46 @@ export interface LiveStateSnapshot {
   active_challenger: ChallengerCandidate | null;
   manual_shield_override: boolean;
   equity_curve?: EquityPoint[];
+  kill_reason?: string;
+  live_trading_enabled?: boolean;
+  entry_block_reason?: string | null;
+  supervisor?: SupervisorStatus;
+  llm?: LLMBrief;
+}
+
+export interface SupervisorLast {
+  decision?: 'APPROVE' | 'REDUCE' | 'REJECT';
+  size_multiplier?: number;
+  reason?: string;
+  provider?: string;
+  latency_ms?: number;
+  error?: string;
+  ts_ms?: number;
+  symbol?: string;
+}
+
+export interface SupervisorStatus {
+  active: boolean;
+  enabled: boolean;
+  timeout_s: number;
+  daily_budget_usd: number;
+  spent_today_usd: number;
+  calls: number;
+  approve: number;
+  reduce: number;
+  reject: number;
+  unavailable: number;
+  last: SupervisorLast;
+}
+
+export interface LLMBrief {
+  enabled: boolean;
+  provider: string;
+  label: string;
+  model: string;
+  fast_model: string;
+  fallbacks: string[];
+  total_cost_usd: number;
 }
 
 export interface TradeRecord {

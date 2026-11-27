@@ -227,6 +227,7 @@ class TradeSupervisor:
         self.settings = settings or SupervisorSettings()
         self._budget = _Budget()
         self.stats = {"calls": 0, "approve": 0, "reduce": 0, "reject": 0, "unavailable": 0}
+        self.last: dict[str, Any] = {}  # latest verdict, shown live on the dashboard
 
     @property
     def active(self) -> bool:
@@ -244,11 +245,23 @@ class TradeSupervisor:
             return f"daily budget ${self.settings.daily_budget_usd:.2f} used"
         return ""
 
+    def _remember(self, v: SupervisorVerdict) -> SupervisorVerdict:
+        self.last = {
+            "decision": v.decision,
+            "size_multiplier": v.size_multiplier,
+            "reason": v.reason,
+            "provider": v.provider,
+            "latency_ms": round(v.latency_ms, 1),
+            "error": v.error,
+            "ts_ms": int(time.time() * 1000),
+        }
+        return v
+
     def _unavailable(self, why: str) -> SupervisorVerdict:
         self.stats["unavailable"] += 1
         if self.settings.on_unavailable == "allow":
-            return SupervisorVerdict("APPROVE", 1.0, f"Supervisor unavailable ({why}); policy=allow", error=why)
-        return SupervisorVerdict("REJECT", 0.0, f"Supervisor unavailable ({why}); policy=block", error=why)
+            return self._remember(SupervisorVerdict("APPROVE", 1.0, f"Supervisor unavailable ({why}); policy=allow", error=why))
+        return self._remember(SupervisorVerdict("REJECT", 0.0, f"Supervisor unavailable ({why}); policy=block", error=why))
 
     async def review(self, context: str) -> SupervisorVerdict:
         why = self._over_budget()
@@ -284,7 +297,7 @@ class TradeSupervisor:
         else:
             mult = 0.0
         self.stats[ans.decision.lower()] += 1
-        return SupervisorVerdict(
+        return self._remember(SupervisorVerdict(
             decision=ans.decision,
             size_multiplier=mult,
             reason=ans.reason[:200],
@@ -292,7 +305,7 @@ class TradeSupervisor:
             provider=f"{res.provider}:{res.model}",
             latency_ms=res.latency_ms,
             cost_usd=res.cost_usd,
-        )
+        ))
 
     def status(self) -> dict[str, Any]:
         s = self.settings
@@ -305,6 +318,7 @@ class TradeSupervisor:
             "on_unavailable": s.on_unavailable,
             "daily_budget_usd": s.daily_budget_usd,
             "spent_today_usd": round(self._budget.spent_usd, 4),
+            "last": self.last,
             **self.stats,
         }
 

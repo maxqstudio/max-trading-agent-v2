@@ -31,6 +31,10 @@ cd max-trading-agent-v2
    - Double-click **`start_mt5_live.bat`** → opens **`http://127.0.0.1:8765`**
    - In MT5 Navigator, drag **`MaxTradingBridge`** onto 1 chart (`XAUUSD` M1). Token is already pre-configured. Broker symbol names are detected automatically (e.g. `XAUUSD.m`, `XAUUSDm`, `pro.XAUUSD`): the EA learns the prefix/suffix from the chart, skips watchlist symbols the broker doesn't offer, and also trades the chart's own symbol. Symbols the EA sends that aren't in `config/default.yaml` are picked up by the backend automatically. If a sync fails, the Experts tab and the chart say why (URL not allowed, wrong token, backend not running).
 
+## Dashboard Setup page
+
+Sidebar **Setup (AI, Supervisor)**: paste an API key, click **Cek model** to pull the model list from the provider (works for Ollama / llama.cpp too), pick the main, fast and fallback models, and order the providers (first answers, the rest are fallbacks). A failing model first falls back to the same provider's fallback models, then to the next provider. Keys are written only to your local `.env` and are shown masked. Supervisor settings are saved to `config/local.yaml` (git-ignored). `ALLOW_LIVE_TRADING`, the tokens and the trading mode at start-up cannot be changed from the browser.
+
 ## AI Providers (Claude first)
 
 Double-click **`llm_setup.bat`** (or `python scripts/llm_setup.py`): pick providers in order, paste keys, accept or change the models, and it tests each connection. Everything is written to your local `.env` only.
