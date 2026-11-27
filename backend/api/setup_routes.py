@@ -65,11 +65,9 @@ class ExitSetupRequest(BaseModel):
     be_at_r: float | None = Field(default=None, ge=0.1, le=3.0)
     trail_start_r: float | None = Field(default=None, ge=0.2, le=5.0)
     trail_dist_r: float | None = Field(default=None, ge=0.05, le=3.0)
-    hit_take_r: float | None = Field(default=None, ge=0.1, le=3.0)
-    hit_trail_dist_r: float | None = Field(default=None, ge=0.0, le=2.0)
-    hit_min_spread_mult: float | None = Field(default=None, ge=0.0, le=10.0)
+    hit_min_net_profit: float | None = Field(default=None, ge=0.0, le=100.0)
+    hit_commission_per_lot: float | None = Field(default=None, ge=0.0, le=100.0)
     adaptive: bool | None = None
-    hit_adaptive: bool | None = None
 
 
 def _mask(key: str) -> str:
@@ -227,7 +225,7 @@ def register_setup_routes(api: APIRouter, orch: TradingOrchestrator, env_path: s
             if v is not None
         })
         hr = orch.config.paper.hit_run.model_copy(update={
-            k: v for k, v in {"take_r": req.hit_take_r, "trail_dist_r": req.hit_trail_dist_r, "min_spread_mult": req.hit_min_spread_mult, "adaptive": req.hit_adaptive}.items()
+            k: v for k, v in {"min_net_profit": req.hit_min_net_profit, "commission_per_lot": req.hit_commission_per_lot}.items()
             if v is not None
         })
         orch.config.exits = ex

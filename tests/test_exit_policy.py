@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 from backend.core.config import EnvSettings, load_trading_config
 from backend.core.models import MarketRegime, Side, TickSnapshot, utc_now_ms
-from backend.engine.exit_policy import HitRun, ProfitLock, evaluate
+from backend.engine.exit_policy import NetTake, ProfitLock, evaluate, net_take
 from backend.engine.orchestrator import HITRUN_VERSION, PAPER_VERSION, TradingOrchestrator
 from backend.llm.router import LLMRouter
 from backend.storage.database import Database
@@ -34,17 +34,14 @@ def test_profit_lock_sell_side_and_spread_cost():
     assert act == "MOVE_SL" and abs(sl - (100.0 - 0.25 - 0.5)) < 1e-9
 
 
-def test_hit_run_needs_min_profit_and_spread_then_trails_tight():
-    hr = HitRun(take_r=0.5, min_spread_mult=2.0, trail_dist_r=0.15)
-    assert ev(hr, 0.3, 101.5)[0] == "HOLD"
-    assert ev(hr, 0.5, 102.5, spread=2.0)[0] == "HOLD"  # 2.5 profit < 2 x 2.0 spread... (2.5 < 4)
-    act, sl = ev(hr, 0.8, 104.0)
-    assert act == "MOVE_SL" and abs(sl - 103.25) < 1e-9  # 0.8 - 0.15 = 0.65R
-
-
-def test_hit_run_instant_take_when_trail_is_zero():
-    hr = HitRun(take_r=0.4, trail_dist_r=0.0)
-    assert ev(hr, 0.45, 102.25)[0] == "CLOSE"
+def test_net_take_needs_profit_after_all_costs():
+    nt = NetTake(min_net_profit=1.0, commission_per_lot=7.0)
+    # 0.10 lot pays $0.70 commission: $1.50 gross is only $0.80 net, not enough yet.
+    assert net_take(nt, gross_money=1.5, volume=0.1) == (False, 0.8)
+    assert net_take(nt, gross_money=1.7, volume=0.1) == (True, 1.0)
+    # Real MT5 costs: swap and the reported commission are used instead of the estimate.
+    assert net_take(nt, gross_money=2.0, volume=0.1, swap=-0.5, commission=-0.4) == (True, 1.1)
+    assert net_take(nt, gross_money=2.0, volume=0.1, swap=-0.8, commission=0.4)[0] is False
 
 
 def test_two_books_same_setup_different_exits(tmp_path: Path):
@@ -70,6 +67,8 @@ def test_two_books_same_setup_different_exits(tmp_path: Path):
                 SimpleNamespace(regime=MarketRegime.RANGING), orch.specs["XAUUSD"], 0.6, 0.6, 10.0,
             )
             now = int(utc_now_ms() // 1000)
+            await orch._update_paper_positions_on_tick(tk(2650.1), now)  # gross $0, net -$0.70: hold
+            assert len(orch.paper_books["hitrun"].positions) == 1
             for bid in (2653.0, 2654.5, 2651.0):  # +0.58R, +0.88R, then back down
                 await orch._update_paper_positions_on_tick(tk(bid), now)
             normal = await db.list_trades(version_id=PAPER_VERSION)
@@ -79,8 +78,9 @@ def test_two_books_same_setup_different_exits(tmp_path: Path):
             await db.close()
 
     normal, hitrun, snap = asyncio.run(run())
-    # Hit & Run locked +0.73R and got stopped out in profit on the pullback
-    assert len(hitrun) == 1 and hitrun[0].pnl_r > 0 and hitrun[0].exit_reason == "LOCK"
+    # Hit & Run took the first net profit; its P&L is after commission
+    assert len(hitrun) == 1 and hitrun[0].exit_reason == "TAKE" and hitrun[0].pnl_money > 0
+    assert hitrun[0].exit_price == 2653.0
     # Normal is still open, but its stop is at breakeven or better now (no full -1R anymore)
     assert normal == []
     pos = snap["books"]["normal"]["positions"][0]
@@ -123,39 +123,3 @@ def test_selector_needs_evidence_before_switching():
     # Unseen regime falls back to the symbol's own evidence.
     assert sel.choose("EURUSD", "VOLATILE").scope == "symbol"
     assert any(r["key"] == "Semua" for r in sel.table())
-
-
-def test_take_learner_replays_every_level_and_switches_only_on_evidence():
-    from backend.engine.exit_policy import HitRun
-    from backend.engine.take_learner import TakeLevelLearner
-
-    base = HitRun(take_r=0.5, min_spread_mult=2.0, trail_dist_r=0.0, be_offset_r=0.05)
-    lrn = TakeLevelLearner(default_take_r=0.5, min_samples=20)
-
-    def setup(path):
-        g = lrn.new_ghost(symbol="EURUSD", regime="RANGING", side=Side.BUY, entry=1.0, risk=0.001, sl=0.999, tp=1.003, open_time=0)
-        for px in path:
-            if g.step(px, 0.00001, base):
-                break
-        assert g.done
-        lrn.record(g)
-        return {a.take_r: a.result_r for a in g.arms}
-
-    # Price runs to +0.8R then collapses to the SL: 0.3/0.5/0.7 take profit, 1.0 loses.
-    r = setup([1.0003, 1.0005, 1.0007, 1.0008, 0.9995, 0.999])
-    assert r[0.3] > 0 and r[0.5] > 0 and r[0.7] > 0 and r[1.0] < 0
-    assert lrn.choose("EURUSD", "RANGING").take_r == 0.5  # one trade is not evidence
-
-    # Runner market: most setups reach +1.1R, so 1.0R earns more per trade than 0.5R.
-    for i in range(24):
-        path = [1.0005, 1.0007, 1.0009, 1.0011] if i % 5 else [1.0002, 0.999]
-        setup(path)
-    c = lrn.choose("EURUSD", "RANGING")
-    assert c.take_r == 1.0 and c.scope in ("symbol|regime", "symbol", "all")
-    assert lrn.choose("EURUSD", "VOLATILE").scope == "symbol"
-
-    saved = lrn.export()
-    other = TakeLevelLearner(default_take_r=0.5, min_samples=20)
-    other.load(saved)
-    assert other.choose("EURUSD", "RANGING").take_r == 1.0
-    assert other.table()[0]["arms"]

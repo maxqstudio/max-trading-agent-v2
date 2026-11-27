@@ -361,7 +361,7 @@ export default function App() {
                       <tbody className="divide-y divide-[#1F2D45]">
                         {paperPositions.map((p) => (
                           <tr key={`paper-${p.book ?? 'normal'}-${p.symbol}`}>
-                            <td className="py-2 px-2"><div className="mono font-bold">{p.symbol} <span className={`px-1 rounded text-[10px] ${p.book === 'hitrun' ? 'bg-[#EC4899]/15 text-[#EC4899]' : 'bg-[#F59E0B]/15 text-[#F59E0B]'}`}>{p.book === 'hitrun' ? `HIT&RUN${p.take_r ? ` ${p.take_r}R` : ''}` : 'NORMAL'}</span></div><div className="text-[#8A9BB5]">{p.strategy_id}</div></td>
+                            <td className="py-2 px-2"><div className="mono font-bold">{p.symbol} <span className={`px-1 rounded text-[10px] ${p.book === 'hitrun' ? 'bg-[#EC4899]/15 text-[#EC4899]' : 'bg-[#F59E0B]/15 text-[#F59E0B]'}`}>{p.book === 'hitrun' ? 'HIT&RUN' : 'NORMAL'}</span></div><div className="text-[#8A9BB5]">{p.strategy_id}</div></td>
                             <td className="py-2 px-2 mono"><span className={`px-1.5 py-0.5 rounded font-bold ${p.side === 'BUY' ? 'bg-[#10B981]/15 text-[#10B981]' : 'bg-[#EF4444]/15 text-[#EF4444]'}`}>{p.side}</span> {p.volume}</td>
                             <td className="py-2 px-2 mono">{p.entry_price} → <b>{p.current_price}</b></td>
                             <td className={`py-2 px-2 mono font-bold ${p.profit >= 0 ? 'text-[#10B981]' : 'text-[#EF4444]'}`}>{p.profit >= 0 ? '+' : ''}${p.profit.toFixed(2)}</td>

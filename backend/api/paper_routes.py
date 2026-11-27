@@ -69,12 +69,5 @@ def register_paper_routes(api: APIRouter, orch: TradingOrchestrator) -> None:
                 "min_samples": orch.exit_selector.min_samples,
                 "groups": orch.exit_selector.table(),
             },
-            "take_learning": {
-                "adaptive": orch.config.paper.hit_run.adaptive,
-                "default_take_r": orch.config.paper.hit_run.take_r,
-                "min_samples": orch.take_learner.min_samples,
-                "pending_setups": len(orch.take_ghosts),
-                "groups": orch.take_learner.table(),
-            },
             "settings": {"exits": orch.config.exits.model_dump(), "hit_run": orch.config.paper.hit_run.model_dump()},
         }
