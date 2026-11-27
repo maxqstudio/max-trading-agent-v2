@@ -397,7 +397,8 @@ class TradingOrchestrator:
                     tag=f"CLOSED {tr.exit_reason}",
                     strategy_id=tr.strategy_id,
                     side=tr.side.value,
-                    message=f"#{tr.ticket} {tr.side.value} {tr.pnl_money:+.2f}$ ({tr.pnl_r:+.2f}R) | MAE {tr.mae_r:.2f}R / MFE +{tr.mfe_r:.2f}R — RL Bandit updated",
+                    message=f"#{tr.ticket} {tr.side.value} {tr.pnl_money:+.2f}$ ({tr.pnl_r:+.2f}R) | MAE {tr.mae_r:.2f}R / MFE +{tr.mfe_r:.2f}R",
+                    metadata={"pnl": round(tr.pnl_money, 2), "pnl_r": round(tr.pnl_r, 3)},
                 )
             )
             await self._notify(
@@ -914,6 +915,7 @@ class TradingOrchestrator:
                     strategy_id=p.strategy_id,
                     side=p.side.value,
                     message=f"Paper {PAPER_LABELS[name]} {p.side.value} {p.volume} lot closed @ {px} ({cur_r:+.2f}R, ${pnl:+.2f}). Equity ${book.equity:,.2f}",
+                    metadata={"pnl": pnl, "pnl_r": round(cur_r, 3)},
                 )
             )
         if changed:

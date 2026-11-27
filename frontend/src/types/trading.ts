@@ -78,6 +78,7 @@ export interface DecisionEvent {
   side: string;
   message: string;
   latency_ms: number;
+  metadata?: { pnl?: number; pnl_r?: number } & Record<string, unknown>;
 }
 
 export interface BacktestMetrics {

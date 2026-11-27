@@ -24,8 +24,17 @@ import { LiveStatusStrip } from './components/LiveStatusStrip';
 import { PaperCompare } from './components/PaperCompare';
 import { RiskConfigView } from './components/RiskConfigView';
 import { SetupView } from './components/SetupView';
+import type { DecisionEvent } from './types/trading';
 
 type TabId = 'cockpit' | 'brain' | 'evolution' | 'journal' | 'risk' | 'setup';
+
+// Result of a closed trade in the execution stream: from metadata, or parsed from older messages.
+function tradeResult(d: DecisionEvent): number | null {
+  if (typeof d.metadata?.pnl === 'number') return d.metadata.pnl;
+  if (d.category !== 'EXEC' || !/closed/i.test(`${d.tag} ${d.message}`)) return null;
+  const m = d.message.match(/\$([+-]\d+(?:\.\d+)?)|([+-]\d+(?:\.\d+)?)\$/);
+  return m ? parseFloat(m[1] ?? m[2]) : null;
+}
 
 export default function App() {
   const { state, wsConnected } = useLiveTelemetry();
@@ -420,20 +429,29 @@ export default function App() {
                     {filteredDecisions.length === 0 ? (
                       <div className="py-6 text-center text-xs text-[#8A9BB5]">Awaiting live decision telemetry...</div>
                     ) : (
-                      filteredDecisions.map((d) => (
-                        <div key={d.id} className="p-2 rounded cockpit-sub text-xs space-y-0.5">
+                      filteredDecisions.map((d) => {
+                        const pnl = tradeResult(d);
+                        const tone = pnl == null ? '' : pnl > 0 ? 'win' : 'loss';
+                        return (
+                        <div
+                          key={d.id}
+                          className={`p-2 rounded cockpit-sub text-xs space-y-0.5 ${tone ? 'border-l-4' : ''}`}
+                          style={tone ? { borderLeftColor: tone === 'win' ? '#10B981' : '#EF4444' } : undefined}
+                        >
                           <div className="flex items-center justify-between mono">
                             <span>
                               <span className="text-[#8A9BB5] mr-1.5">{new Date(d.timestamp_ms).toISOString().substring(11, 19)}</span>
                               <b>{d.symbol}</b>
                             </span>
-                            <span className={`px-1.5 py-0.5 rounded font-bold ${d.category === 'EXEC' ? 'bg-[#10B981]/15 text-[#10B981]' : d.category === 'BLOCK' ? 'bg-[#F59E0B]/15 text-[#F59E0B]' : 'bg-[#06B6D4]/15 text-[#06B6D4]'}`}>
+                            <span className={`px-1.5 py-0.5 rounded font-bold ${tone === 'win' ? 'bg-[#10B981]/20 text-[#10B981]' : tone === 'loss' ? 'bg-[#EF4444]/20 text-[#EF4444]' : d.category === 'EXEC' ? 'bg-[#06B6D4]/15 text-[#06B6D4]' : d.category === 'BLOCK' ? 'bg-[#F59E0B]/15 text-[#F59E0B]' : 'bg-[#06B6D4]/15 text-[#06B6D4]'}`}>
                               {d.tag}
+                              {pnl != null ? ` ${pnl > 0 ? '+' : pnl < 0 ? '-' : ''}$${Math.abs(pnl).toFixed(2)}` : ''}
                             </span>
                           </div>
-                          <div className="text-[#8A9BB5] leading-snug">{d.message}</div>
+                          <div className={`leading-snug ${tone === 'win' ? 'text-[#6EE7B7]' : tone === 'loss' ? 'text-[#FCA5A5]' : 'text-[#8A9BB5]'}`}>{d.message}</div>
                         </div>
-                      ))
+                        );
+                      })
                     )}
                   </div>
                 </div>
