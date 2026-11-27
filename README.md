@@ -2,6 +2,10 @@
 
 **Battle-Ready Autonomous Self-Improving MT5 Scalping Agent** (`XAUUSD`, `EURUSD`, `GBPUSD`, `USDJPY` — M1/M5) featuring a **4-Pillar Full Hybrid AI Brain** (**Lightweight NumPy 1D-CNN DL** + **Calibrated HistGradientBoosting ML** + **Dual RL [Contextual Thompson Bandit + Q-Learning Dynamic Exit]** + **LLM Post-Mortem Reflection**), guarded by a **4-Stage Anti-Overfit Champion/Challenger Gate**, a **Zero-DLL Idempotent MQL5 Execution Bridge**, an **Institutional Quant Cockpit Web Dashboard**, and a **Telegram Control Bot**.
 
+## Quick Start: `start_all.bat` (Windows)
+
+Double-click **`start_all.bat`**. The first time it installs everything (venv, dependencies, dashboard, MT5 EA, tests), creates the security tokens, offers to set up your Claude/Gemini/OpenAI key, asks Simulator or MT5 bridge, then starts the bot and opens the dashboard (the login token is copied to your clipboard). Every run after that goes **straight to the dashboard**. Run `start_all.bat --setup` to change mode or redo setup. It always starts in paper trading / simulator; real money stays locked unless you set `ALLOW_LIVE_TRADING=true` in `.env` yourself.
+
 ## One-Click Setup & Launch (Windows)
 
 After cloning on any Windows PC (or VPS):
