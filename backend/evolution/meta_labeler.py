@@ -135,6 +135,12 @@ class CalibratedMetaLabeler:
             return probs[:, 1]
         return np.full((len(x),), 0.55, dtype=np.float64)
 
+    def score(self, x: np.ndarray, y: np.ndarray) -> float | None:
+        """Brier score (lower is better) on held-out samples; None without enough evidence."""
+        if not self.trained or len(x) < 10 or len(np.unique(y)) < 2:
+            return None
+        return round(float(brier_score_loss(y, self.predict_proba_batch(x))), 5)
+
     def predict_win_probability(self, feat_vec: np.ndarray) -> float:
         x = feat_vec[None, :] if feat_vec.ndim == 1 else feat_vec
         return round(float(self.predict_proba_batch(x)[0]), 4)

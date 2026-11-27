@@ -21,6 +21,9 @@ from backend.risk.manager import DEFAULT_SPECS
 from backend.strategies.registry import StrategySuite
 
 
+LOOKBACK_BARS = 300
+
+
 class CausalBacktester:
     """Realistic M1-M5 bar-by-bar backtester with ZERO lookahead bias.
 
@@ -67,7 +70,9 @@ class CausalBacktester:
             spec = sym_specs.get(symbol, DEFAULT_SPECS["XAUUSD"])
             i = 48
             while i < len(bars) - 2:
-                window = bars[: i + 1]
+                # Indicators only look back a few hundred bars (the live engine keeps 600), so a
+                # trailing window keeps each step O(1) instead of re-reading days of history.
+                window = bars[max(0, i + 1 - LOOKBACK_BARS) : i + 1]
                 assess = classify_regime(window)
                 if assess is None:
                     i += 1

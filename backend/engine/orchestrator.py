@@ -35,6 +35,7 @@ from backend.evolution.llm_reflector import LLMReflectionAnalyst
 from backend.llm.router import LLMRouter
 from backend.engine.exit_policy import HitRun, ProfitLock, evaluate
 from backend.engine.exit_selector import ExitStyleSelector
+from backend.engine.take_learner import GhostTrade, TakeLevelLearner
 from backend.engine.supervisor import SupervisorSettings, TradeSupervisor, build_context, price_drifted, scale_volume
 from backend.evolution.meta_labeler import CalibratedMetaLabeler
 from backend.evolution.optimizer import PurgedWalkForwardOptimizer
@@ -66,6 +67,7 @@ class ShadowPosition:
     mfe_r: float = 0.0
     version_id: str = "shadow"
     volume: float = 0.10
+    take_r: float = 0.0  # Hit & Run take level for this position (0 = config default)
 
 
 PAPER_VERSION = "PAPER"  # Normal book (kept for journal compatibility)
@@ -181,6 +183,9 @@ class TradingOrchestrator:
         # Paper books run side by side on the same approved setups, in every mode:
         # "normal" = existing exits + profit lock, "hitrun" = take profit fast.
         self.exit_selector = ExitStyleSelector(min_samples=config.exits.adaptive_min_samples)
+        hr = config.paper.hit_run
+        self.take_learner = TakeLevelLearner(default_take_r=hr.take_r, min_samples=hr.adaptive_min_samples)
+        self.take_ghosts: list[GhostTrade] = []
         self.paper_books: dict[str, PaperBook] = {
             k: PaperBook(equity=config.paper.start_equity) for k in PAPER_BOOKS
         }
@@ -245,6 +250,8 @@ class TradingOrchestrator:
                 if p:
                     book.positions[p.symbol] = p
         await self._rebuild_exit_selector()
+        self.take_learner.load(await self.db.get_kv("hitrun_take_stats"))
+        self.take_ghosts = [g for g in (GhostTrade.from_dict(d) for d in (await self.db.get_kv("hitrun_ghosts") or {}).get("open", [])) if g]
         self.order_sm.import_tracking(await self.db.get_kv("mt5_tracking"))
         self._tracking_sig = tuple(sorted(self.order_sm.active_positions))
 
@@ -777,8 +784,16 @@ class TradingOrchestrator:
                 spread_pts=spread_pts,
                 version_id=PAPER_BOOKS[name],
                 volume=risk_dec.volume,
+                take_r=self._take_r(sym, assess.regime) if name == "hitrun" else 0.0,
             )
             opened = True
+            if name == "hitrun":
+                self.take_ghosts.append(self.take_learner.new_ghost(
+                    symbol=sym, regime=assess.regime.value, side=sig.side, entry=round(entry, spec.digits),
+                    risk=max(abs(entry - sl), spec.point), sl=sl, tp=tp, open_time=int(utc_now_ms() // 1000),
+                ))
+                self.take_ghosts = self.take_ghosts[-200:]
+                await self._save_take_learning()
         if opened:
             await self._save_paper()
 
@@ -802,15 +817,48 @@ class TradingOrchestrator:
             return "normal"
         return self.exit_selector.choose(symbol, regime.value).style
 
-    def _exit_policy(self, book: str) -> ProfitLock | HitRun:
+    def _take_r(self, symbol: str, regime: MarketRegime) -> float:
+        h = self.config.paper.hit_run
+        self.take_learner.default_take_r = h.take_r
+        if not h.adaptive:
+            return h.take_r
+        return self.take_learner.choose(symbol, regime.value).take_r
+
+    async def _save_take_learning(self) -> None:
+        now = utc_now_ms()
+        await self.db.set_kv("hitrun_take_stats", self.take_learner.export(), now)
+        await self.db.set_kv("hitrun_ghosts", {"open": [g.to_dict() for g in self.take_ghosts]}, now)
+
+    async def _step_take_ghosts(self, tk: TickSnapshot, now_sec: int, spread_px: float) -> None:
+        """Replay every take level on this tick; learn from the setups where all levels have finished."""
+        base = self._exit_policy("hitrun")
+        finished = []
+        for g in self.take_ghosts:
+            if g.symbol != tk.symbol:
+                continue
+            px = tk.bid if g.side == Side.BUY.value else tk.ask
+            timed_out = now_sec - g.open_time >= self.config.paper.max_hold_min * 60
+            if g.step(px, spread_px, base, timed_out=timed_out):
+                finished.append(g)
+        if finished:
+            for g in finished:
+                self.take_learner.record(g)
+                self.take_ghosts.remove(g)
+            await self._save_take_learning()
+
+    def _exit_policy(self, book: str, take_r: float = 0.0) -> ProfitLock | HitRun:
         if book == "hitrun":
             h = self.config.paper.hit_run
-            return HitRun(take_r=h.take_r, min_spread_mult=h.min_spread_mult, trail_dist_r=h.trail_dist_r, be_offset_r=h.be_offset_r)
+            return HitRun(take_r=take_r or h.take_r, min_spread_mult=h.min_spread_mult, trail_dist_r=h.trail_dist_r, be_offset_r=h.be_offset_r)
         e = self.config.exits
         return ProfitLock(be_at_r=e.be_at_r, be_offset_r=e.be_offset_r, trail_start_r=e.trail_start_r, trail_dist_r=e.trail_dist_r)
 
     async def _update_paper_positions_on_tick(self, tk: TickSnapshot, now_sec: int) -> None:
         changed = False
+        if self.take_ghosts:
+            spec0 = self.specs.get(tk.symbol)
+            sp = (tk.ask - tk.bid) if tk.ask > tk.bid else (tk.spread_points * (spec0.point if spec0 else 0.0))
+            await self._step_take_ghosts(tk, now_sec, sp)
         for name, book in self.paper_books.items():
             p = book.positions.get(tk.symbol)
             if p is None:
@@ -822,7 +870,7 @@ class TradingOrchestrator:
             spec = self.specs.get(p.symbol)
             spread_px = (tk.ask - tk.bid) if tk.ask > tk.bid else (tk.spread_points * (spec.point if spec else 0.0))
             action, new_sl = evaluate(
-                self._exit_policy(name), side=p.side, entry=p.entry_price, risk=p.risk_dist,
+                self._exit_policy(name, p.take_r), side=p.side, entry=p.entry_price, risk=p.risk_dist,
                 price=px, peak_r=p.mfe_r, sl=p.sl, spread_px=spread_px,
             )
             if action == "MOVE_SL":
@@ -893,6 +941,7 @@ class TradingOrchestrator:
                     "symbol": p.symbol, "side": p.side.value, "volume": p.volume, "entry_price": p.entry_price,
                     "current_price": px, "sl": p.sl, "tp": p.tp, "strategy_id": p.strategy_id,
                     "profit": self._paper_money(p, px), "open_time": p.open_time,
+                    "take_r": p.take_r if name == "hitrun" else None,
                 })
             books[name] = {"label": PAPER_LABELS[name], "equity": book.equity, "positions": out}
         normal = books["normal"]
@@ -916,7 +965,7 @@ class TradingOrchestrator:
             spread_px = (tk.ask - tk.bid) if tk and tk.ask > tk.bid else 0.0
             style = self._mt5_exit_style(pos.symbol, meta.regime)
             lock_action, lock_sl = evaluate(
-                self._exit_policy(style), side=meta.side, entry=meta.entry_price, risk=meta.initial_risk_price,
+                self._exit_policy(style, self._take_r(pos.symbol, meta.regime) if style == "hitrun" else 0.0), side=meta.side, entry=meta.entry_price, risk=meta.initial_risk_price,
                 price=pos.current_price, peak_r=meta.mfe_r, sl=pos.sl, spread_px=spread_px,
             )
             if lock_action == "CLOSE":
@@ -1166,13 +1215,27 @@ class TradingOrchestrator:
                     await self.db.save_snapshot(sn)
                 await self._notify(f"Challenger AUTO-PROMOTED to Champion {self.gate.active_snapshot.version_id}!")
 
+    async def _training_bars(self) -> dict[str, list[Bar]]:
+        """Several days of M1 bars per symbol from the database (falls back to the live buffer)."""
+        limit = max(600, self.config.evolution.train_window_bars)
+        out: dict[str, list[Bar]] = {}
+        for sym, buf in self.bars.items():
+            stored = await self.db.load_recent_bars(sym, "M1", limit=limit)
+            live = list(buf)
+            if live and stored and live[-1].timestamp > stored[-1].timestamp:
+                stored += [b for b in live if b.timestamp > stored[-1].timestamp]
+            bars = stored if len(stored) >= len(live) else live
+            if len(bars) >= 120:
+                out[sym] = bars[-limit:]
+        return out
+
     async def run_evolution_cycle(self) -> dict[str, Any]:
         """Full 4-Stage Self-Improvement Cycle: Reflection -> Purged WFO + DL/ML Retrain -> Monte Carlo -> Shadow Gate."""
         if self.evolution_running:
             return {"status": "already_running"}
         self.evolution_running = True
         try:
-            bars_map = {s: list(buf) for s, buf in self.bars.items() if len(buf) >= 120}
+            bars_map = await self._training_bars()
             if not bars_map:
                 return {"status": "insufficient_bars", "message": "Need at least 120 closed M1 bars per symbol"}
 
@@ -1187,15 +1250,32 @@ class TradingOrchestrator:
                 self.config,
                 reflection.patches,
                 self.specs,
+                self.dl_net,
+                self.ml_labeler,
+                self.config.evolution.param_window_bars,
             )
 
-            # Adopt freshly trained DL 1D-CNN & Calibrated ML Meta-Labeler if valid
-            if wfo.trained_dl.trained:
+            # A new model replaces the champion only when it scored better on unseen data.
+            if wfo.dl_decision.get("adopted"):
                 self.dl_net = wfo.trained_dl
                 self.dl_net.save(f"{self.config.app.snapshots_dir}/dl_champion.npz")
-            if wfo.trained_ml.trained:
+            if wfo.ml_decision.get("adopted"):
                 self.ml_labeler = wfo.trained_ml
                 self.ml_labeler.save(f"{self.config.app.snapshots_dir}/ml_champion.pkl")
+            n_bars = {s: len(b) for s, b in bars_map.items()}
+            for name, dec in (("1D-CNN", wfo.dl_decision), ("Meta-labeler", wfo.ml_decision)):
+                await self._log_decision(
+                    DecisionEvent(
+                        symbol="EVOLUTION",
+                        category="EVOLUTION",
+                        tag=f"{name} {'UPDATED' if dec.get('adopted') else 'KEPT'}",
+                        message=(
+                            f"{name}: {'model baru dipakai' if dec.get('adopted') else 'champion lama dipertahankan'}"
+                            f"{' (lanjut dari weight champion)' if dec.get('warm_start') else ''}. {dec.get('reason', '')}. "
+                            f"Data: {max(n_bars.values())} bar M1 per pasar"
+                        ),
+                    )
+                )
 
             cand = self.gate.submit_candidate(
                 candidate_config=wfo.best_config,
@@ -1230,6 +1310,9 @@ class TradingOrchestrator:
                 "reflection": reflection.model_dump(mode="json"),
                 "dl_train": wfo.dl_train_summary,
                 "ml_train": wfo.ml_train_summary,
+                "dl_decision": wfo.dl_decision,
+                "ml_decision": wfo.ml_decision,
+                "training_bars": n_bars,
             }
         finally:
             self.evolution_running = False

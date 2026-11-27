@@ -33,11 +33,20 @@ interface Group {
   need: number;
 }
 
+interface TakeGroup {
+  key: string;
+  arms: { take_r: number; n: number; avg_r: number; wr: number }[];
+  pick: number | null;
+  reason: string;
+  need: number;
+}
+
 interface Compare {
   rows: Row[];
   ai_cost_today_usd: number;
   note: string;
   learning: { adaptive: boolean; min_samples: number; groups: Group[] };
+  take_learning?: { adaptive: boolean; default_take_r: number; min_samples: number; pending_setups: number; groups: TakeGroup[] };
 }
 
 const COLOR: Record<string, string> = { normal: '#F59E0B', hitrun: '#EC4899', mt5: '#3B82F6' };
@@ -64,6 +73,17 @@ export const PaperCompare: React.FC = () => {
     return () => window.clearInterval(id);
   }, []);
 
+  const toggleTakeAdaptive = async () => {
+    if (!data?.take_learning) return;
+    setBusy(true);
+    try {
+      await api.saveExits({ hit_adaptive: !data.take_learning.adaptive });
+      await load();
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const toggleAdaptive = async () => {
     if (!data) return;
     setBusy(true);
@@ -79,6 +99,8 @@ export const PaperCompare: React.FC = () => {
   const best =
     paper.length === 2 && paper.every((r) => r.trades > 0) ? (paper[0].net_pnl >= paper[1].net_pnl ? paper[0].book : paper[1].book) : null;
   const groups = (data?.learning.groups ?? []).filter((g) => g.normal_n + g.hitrun_n > 0);
+  const tl = data?.take_learning;
+  const takeArms = Array.from(new Set((tl?.groups ?? []).flatMap((g) => g.arms.map((a) => a.take_r)))).sort((a, b) => a - b);
 
   return (
     <div className="cockpit-card rounded-lg">
@@ -193,6 +215,68 @@ export const PaperCompare: React.FC = () => {
           <p className="text-[#8A9BB5]">Belum ada trade paper yang selesai.</p>
         )}
       </div>
+
+      {tl ? (
+        <div className="px-3 py-2 border-t border-[#1F2D45] text-xs space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="font-bold flex items-center gap-1.5">
+              <Brain className="w-3.5 h-3.5 text-[#EC4899]" /> Target take Hit &amp; Run adaptif
+            </span>
+            <button
+              disabled={busy}
+              onClick={toggleTakeAdaptive}
+              title="Kalau mati, Hit & Run selalu memakai target default."
+              className={`px-2 py-0.5 rounded border font-bold cursor-pointer disabled:opacity-50 ${
+                tl.adaptive ? 'border-[#10B981]/50 text-[#10B981] bg-[#10B981]/10' : 'border-[#1F2D45] text-[#8A9BB5]'
+              }`}
+            >
+              Adaptif: {tl.adaptive ? 'AKTIF' : 'MATI'}
+            </button>
+          </div>
+          <p className="text-[#8A9BB5]">
+            Setiap setup Hit &amp; Run diputar ulang untuk semua target ({takeArms.length ? takeArms.map((t) => `${t}R`).join(' / ') : '0.3R / 0.5R / 0.7R / 1.0R'}) di harga yang
+            sama, SL yang sama, dan tetap minimal 2x spread. Target default {tl.default_take_r}R baru diganti setelah {tl.min_samples} trade dan target lain jelas lebih
+            baik. Setup yang masih berjalan: {tl.pending_setups}.
+          </p>
+          {tl.groups.length ? (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="border-b border-[#1F2D45] text-[#8A9BB5]">
+                    <th className="py-1 px-2">Pasar · kondisi</th>
+                    {takeArms.map((t) => (
+                      <th key={t} className="py-1 px-2 text-right">
+                        {t}R (avg R · WR)
+                      </th>
+                    ))}
+                    <th className="py-1 px-2 text-right">Dipakai</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#1F2D45] mono">
+                  {tl.groups.map((g) => (
+                    <tr key={g.key} title={g.reason}>
+                      <td className="py-1 px-2 font-bold">{g.key}</td>
+                      {takeArms.map((t) => {
+                        const a = g.arms.find((x) => x.take_r === t);
+                        return (
+                          <td key={t} className={`py-1 px-2 text-right ${g.pick === t ? 'text-[#EC4899] font-bold' : ''}`}>
+                            {a ? `${signed(a.avg_r)} · ${a.wr.toFixed(0)}%` : '—'}
+                          </td>
+                        );
+                      })}
+                      <td className="py-1 px-2 text-right font-bold text-[#EC4899]">
+                        {g.pick != null ? `${g.pick}R` : <span className="text-[#8A9BB5] font-normal">{tl.default_take_r}R (butuh {g.need} lagi)</span>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="text-[#8A9BB5]">Belum ada setup Hit &amp; Run yang selesai.</p>
+          )}
+        </div>
+      ) : null}
     </div>
   );
 };

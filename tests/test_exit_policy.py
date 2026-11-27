@@ -123,3 +123,39 @@ def test_selector_needs_evidence_before_switching():
     # Unseen regime falls back to the symbol's own evidence.
     assert sel.choose("EURUSD", "VOLATILE").scope == "symbol"
     assert any(r["key"] == "Semua" for r in sel.table())
+
+
+def test_take_learner_replays_every_level_and_switches_only_on_evidence():
+    from backend.engine.exit_policy import HitRun
+    from backend.engine.take_learner import TakeLevelLearner
+
+    base = HitRun(take_r=0.5, min_spread_mult=2.0, trail_dist_r=0.0, be_offset_r=0.05)
+    lrn = TakeLevelLearner(default_take_r=0.5, min_samples=20)
+
+    def setup(path):
+        g = lrn.new_ghost(symbol="EURUSD", regime="RANGING", side=Side.BUY, entry=1.0, risk=0.001, sl=0.999, tp=1.003, open_time=0)
+        for px in path:
+            if g.step(px, 0.00001, base):
+                break
+        assert g.done
+        lrn.record(g)
+        return {a.take_r: a.result_r for a in g.arms}
+
+    # Price runs to +0.8R then collapses to the SL: 0.3/0.5/0.7 take profit, 1.0 loses.
+    r = setup([1.0003, 1.0005, 1.0007, 1.0008, 0.9995, 0.999])
+    assert r[0.3] > 0 and r[0.5] > 0 and r[0.7] > 0 and r[1.0] < 0
+    assert lrn.choose("EURUSD", "RANGING").take_r == 0.5  # one trade is not evidence
+
+    # Runner market: most setups reach +1.1R, so 1.0R earns more per trade than 0.5R.
+    for i in range(24):
+        path = [1.0005, 1.0007, 1.0009, 1.0011] if i % 5 else [1.0002, 0.999]
+        setup(path)
+    c = lrn.choose("EURUSD", "RANGING")
+    assert c.take_r == 1.0 and c.scope in ("symbol|regime", "symbol", "all")
+    assert lrn.choose("EURUSD", "VOLATILE").scope == "symbol"
+
+    saved = lrn.export()
+    other = TakeLevelLearner(default_take_r=0.5, min_samples=20)
+    other.load(saved)
+    assert other.choose("EURUSD", "RANGING").take_r == 1.0
+    assert other.table()[0]["arms"]

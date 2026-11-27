@@ -89,6 +89,12 @@ class EvolutionConfig(BaseModel):
     rollback_live_dd_pct: float = 1.50
     rollback_min_trades: int = 8
     wfo_trials: int = 12
+    # The DL/ML models learn from this many recent M1 bars per symbol, read from the database
+    # (4320 = 3 days). Strategy parameters are searched on the most recent param_window_bars.
+    train_window_bars: int = 4320
+    param_window_bars: int = 600
+    # The CNN continues from the champion's weights at this fraction of the normal learning rate.
+    dl_finetune_lr_mult: float = 0.5
 
 
 class SupervisorConfig(BaseModel):
@@ -123,6 +129,10 @@ class HitRunConfig(BaseModel):
     min_spread_mult: float = 2.0  # and at least 2x spread
     trail_dist_r: float = 0.15  # 0 = close at once when take_r is reached
     be_offset_r: float = 0.05
+    # Learn the take level (0.3/0.5/0.7/1.0R) per symbol+regime; take_r stays the default
+    # until a group has adaptive_min_samples trades and another level is clearly better.
+    adaptive: bool = True
+    adaptive_min_samples: int = 20
 
 
 class PaperConfig(BaseModel):

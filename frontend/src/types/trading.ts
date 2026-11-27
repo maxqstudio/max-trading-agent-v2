@@ -178,6 +178,7 @@ export interface LiveStateSnapshot {
 
 export interface PaperPosition {
   book?: 'normal' | 'hitrun';
+  take_r?: number | null;
   label?: string;
   symbol: string;
   side: 'BUY' | 'SELL';
