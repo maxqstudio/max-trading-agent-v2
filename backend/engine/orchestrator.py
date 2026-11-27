@@ -180,6 +180,7 @@ class TradingOrchestrator:
         self.readiness: dict[str, int] = {s: 35 for s in config.instruments.symbols}
         self.buy_pressure: dict[str, int] = {s: 50 for s in config.instruments.symbols}
         self.shield_status: dict[str, str] = {s: "CLEAR" for s in config.instruments.symbols}
+        self.ichi_scores: dict[str, int] = {s: 0 for s in config.instruments.symbols}
         self.open_positions: list[LivePosition] = []
         self.recent_decisions: deque[DecisionEvent] = deque(maxlen=120)
 
@@ -211,9 +212,11 @@ class TradingOrchestrator:
         self._recent_closed: deque[TradeRecord] = deque(maxlen=60)
         self.gate = ChampionChallengerGate(config, initial_equity=self.account.equity)
 
-        # Parallel Live Shadow Arena
+        # Parallel Live Shadow Arena (1 = with AI Supervisor veto & filters, 1 = pure raw Challenger)
         self.shadow_positions: dict[str, ShadowPosition] = {}
         self.shadow_equity: float = 10000.0
+        self.shadow_raw_positions: dict[str, ShadowPosition] = {}
+        self.shadow_raw_equity: float = 10000.0
         # Paper trading (SHADOW_ONLY mode): the champion's approved trades, filled virtually.
         # Paper books run side by side on the same approved setups, in every mode:
         # "normal" = existing exits + profit lock, "hitrun" = take profit fast.
@@ -282,6 +285,11 @@ class TradingOrchestrator:
                 p = _pos_from_dict(d)
                 if p:
                     self.shadow_positions[p.symbol] = p
+            self.shadow_raw_equity = float(arena.get("raw_equity", self.shadow_raw_equity))
+            for d in arena.get("raw_positions", []):
+                p = _pos_from_dict(d)
+                if p:
+                    self.shadow_raw_positions[p.symbol] = p
         books = await self.db.get_kv("paper_books")
         if not books:
             legacy = await self.db.get_kv("paper_book")  # single book from the previous version
@@ -632,6 +640,7 @@ class TradingOrchestrator:
         # Market facts from the full buffer: M15/H1 direction, M15 Ichimoku, yesterday's range
         htf = (htf_bias(all_bars, 15), htf_bias(all_bars, 60))
         ichi_m15 = ichimoku.htf_score(all_bars, 15)  # M15 Ichimoku checklist, needs ~26 h of M1 bars
+        self.ichi_scores[sym] = ichi_m15
         prev_day = prev_day_range(all_bars)
         mkt = {"prev_day": prev_day, "htf_m15": htf[0], "htf_h1": htf[1]}
 
@@ -967,7 +976,12 @@ class TradingOrchestrator:
     async def _save_arena(self) -> None:
         await self.db.set_kv(
             "shadow_arena",
-            {"equity": self.shadow_equity, "positions": [_pos_to_dict(p) for p in self.shadow_positions.values()]},
+            {
+                "equity": self.shadow_equity,
+                "positions": [_pos_to_dict(p) for p in self.shadow_positions.values()],
+                "raw_equity": self.shadow_raw_equity,
+                "raw_positions": [_pos_to_dict(p) for p in self.shadow_raw_positions.values()],
+            },
             utc_now_ms(),
         )
 
@@ -1468,6 +1482,8 @@ class TradingOrchestrator:
         self.paper_books = {k: PaperBook(equity=start) for k in PAPER_BOOKS}
         self.shadow_positions.clear()
         self.shadow_equity = start
+        self.shadow_raw_positions.clear()
+        self.shadow_raw_equity = start
         self.veto_stats = {}
         self.exit_selector = ExitStyleSelector(min_samples=self.config.exits.adaptive_min_samples)
         self.hitrun_tuner = HitRunTuner(min_samples=self.config.paper.hit_run.adaptive_min_samples)
@@ -1759,7 +1775,7 @@ class TradingOrchestrator:
         ichi_m15: int = 0,
         prev_day: tuple[float, float] | None = None,
     ) -> None:
-        if sym in self.shadow_positions:
+        if sym in self.shadow_positions and sym in self.shadow_raw_positions:
             return
         cand = self.gate.active_challenger
         shadow_cfg = TradingConfig.model_validate(cand.config_snapshot) if cand else self.config
@@ -1789,90 +1805,127 @@ class TradingOrchestrator:
         if ml_p < effective_ml_cutoff(shadow_cfg.ai.ml_min_probability, sig_rr):
             return
 
-        # Mirror Champion's P0 Entry Filters (HTF trend guard, Ranging breakout guard, session, Ichimoku)
-        side_sign = 1.0 if best.side == Side.BUY else -1.0
-        entry_ctx = {
-            "htf_m15": alignment(side_sign, htf[0]),
-            "htf_h1": alignment(side_sign, htf[1]),
-            "session": session_of(bars[-1].timestamp, self.server_offset_sec),
-            "ichi_m15": int(ichi_m15 * side_sign),
-        }
-        if self._entry_filter(entry_ctx, strategy_id=best.strategy_id, regime=regime.value).code:
-            return
+        base_ver = cand.version_id if cand else f"{self.config.app.version}-shadow"
+        stages = self._stages_inside(best, entry, best.tp_price)
+        changed = False
 
-        # Mirror Champion's AI Supervisor veto using the shared 0ms DeskBrief ($0 extra API cost, read-only stats)
-        size_mult = 1.0
-        reviewed = self.supervisor.active and (
-            self.config.app.trading_mode != TradingMode.SHADOW_ONLY or self.config.supervisor.review_in_shadow
-        )
-        if reviewed:
-            verdict = self.supervisor.evaluate_from_brief(sym, best.side, best.strategy_id, record_stats=False)
-            if not verdict.allows_entry:
-                return
-            size_mult = max(0.1, min(1.0, verdict.size_multiplier))
+        # 1) Pure Challenger (Raw): opens before filters & AI Supervisor veto for direct A/B comparison
+        if sym not in self.shadow_raw_positions:
+            self.shadow_raw_positions[sym] = ShadowPosition(
+                symbol=sym,
+                strategy_id=best.strategy_id,
+                regime=regime,
+                side=best.side,
+                entry_price=round(entry, spec.digits),
+                sl=round(best.sl_price, spec.digits),
+                tp=round(best.tp_price, spec.digits),
+                risk_dist=risk_d,
+                open_time=now_sec,
+                ml_conf=ml_p,
+                dl_conf=dl_pred.prob_up if best.side == Side.BUY else dl_pred.prob_down,
+                spread_pts=spread_pts,
+                volume=1.0,
+                version_id=f"{base_ver}-raw",
+                tp_stages=list(stages),
+            )
+            changed = True
 
-        self.shadow_positions[sym] = ShadowPosition(
-            symbol=sym,
-            strategy_id=best.strategy_id,
-            regime=regime,
-            side=best.side,
-            entry_price=round(entry, spec.digits),
-            sl=round(best.sl_price, spec.digits),
-            tp=round(best.tp_price, spec.digits),
-            risk_dist=risk_d,
-            open_time=now_sec,
-            ml_conf=ml_p,
-            dl_conf=dl_pred.prob_up if best.side == Side.BUY else dl_pred.prob_down,
-            spread_pts=spread_pts,
-            volume=round(size_mult, 2),  # risk scale factor (1.0 = full risk, <1.0 = reduced by AI Supervisor)
-            version_id=cand.version_id if cand else f"{self.config.app.version}-shadow",
-            tp_stages=self._stages_inside(best, entry, best.tp_price),
-        )
-        await self._save_arena()
+        # 2) Supervised Challenger (AI Veto): passes P0 Entry Filters + shared 0ms AI Supervisor DeskBrief
+        if sym not in self.shadow_positions:
+            side_sign = 1.0 if best.side == Side.BUY else -1.0
+            entry_ctx = {
+                "htf_m15": alignment(side_sign, htf[0]),
+                "htf_h1": alignment(side_sign, htf[1]),
+                "session": session_of(bars[-1].timestamp, self.server_offset_sec),
+                "ichi_m15": int(ichi_m15 * side_sign),
+            }
+            if not self._entry_filter(entry_ctx, strategy_id=best.strategy_id, regime=regime.value).code:
+                size_mult = 1.0
+                allowed = True
+                reviewed = self.supervisor.active and (
+                    self.config.app.trading_mode != TradingMode.SHADOW_ONLY or self.config.supervisor.review_in_shadow
+                )
+                if reviewed:
+                    verdict = self.supervisor.evaluate_from_brief(sym, best.side, best.strategy_id, record_stats=False)
+                    allowed = verdict.allows_entry
+                    size_mult = max(0.1, min(1.0, verdict.size_multiplier))
+                if allowed:
+                    self.shadow_positions[sym] = ShadowPosition(
+                        symbol=sym,
+                        strategy_id=best.strategy_id,
+                        regime=regime,
+                        side=best.side,
+                        entry_price=round(entry, spec.digits),
+                        sl=round(best.sl_price, spec.digits),
+                        tp=round(best.tp_price, spec.digits),
+                        risk_dist=risk_d,
+                        open_time=now_sec,
+                        ml_conf=ml_p,
+                        dl_conf=dl_pred.prob_up if best.side == Side.BUY else dl_pred.prob_down,
+                        spread_pts=spread_pts,
+                        volume=round(size_mult, 2),
+                        version_id=base_ver,
+                        tp_stages=list(stages),
+                    )
+                    changed = True
+
+        if changed:
+            await self._save_arena()
 
     async def _update_shadow_positions_on_tick(self, tk: TickSnapshot, now_sec: int) -> None:
-        spos = self.shadow_positions.get(tk.symbol)
-        if spos is None:
-            return
-        spec = self.specs.get(spos.symbol)
-        px = tk.bid if spos.side == Side.BUY else tk.ask
-        cur_r = (
-            (px - spos.entry_price) / spos.risk_dist
-            if spos.side == Side.BUY
-            else (spos.entry_price - px) / spos.risk_dist
-        )
-        spos.mae_r = min(spos.mae_r, cur_r)
-        spos.mfe_r = max(spos.mfe_r, cur_r)
-
+        spec = self.specs.get(tk.symbol)
         spread_px = (tk.ask - tk.bid) if tk.ask > tk.bid else (tk.spread_points * (spec.point if spec else 0.0))
-        comm_px = self._commission_price(spos.symbol, spec)
-        action, new_sl = evaluate(
-            self._exit_policy(), side=spos.side, entry=spos.entry_price, risk=spos.risk_dist,
-            price=px, peak_r=spos.mfe_r, sl=spos.sl, spread_px=spread_px, commission_px=comm_px,
-        )
-        if spos.tp_stages:
-            peak_px = spos.entry_price + spos.mfe_r * spos.risk_dist if spos.side == Side.BUY else spos.entry_price - spos.mfe_r * spos.risk_dist
-            staged = stage_stop(
-                side=spos.side, entry=spos.entry_price, stages=spos.tp_stages, peak_price=peak_px,
-                sl=new_sl if action == "MOVE_SL" else spos.sl, cost_px=spread_px + comm_px,
+        comm_px = self._commission_price(tk.symbol, spec)
+        arena_changed = False
+
+        for is_raw, pos_map in ((False, self.shadow_positions), (True, self.shadow_raw_positions)):
+            spos = pos_map.get(tk.symbol)
+            if spos is None:
+                continue
+            px = tk.bid if spos.side == Side.BUY else tk.ask
+            cur_r = (
+                (px - spos.entry_price) / spos.risk_dist
+                if spos.side == Side.BUY
+                else (spos.entry_price - px) / spos.risk_dist
             )
-            if staged is not None:
-                action, new_sl = "MOVE_SL", staged
-        if action == "MOVE_SL":
-            spos.sl = round(new_sl, spec.digits if spec else 5)
+            spos.mae_r = min(spos.mae_r, cur_r)
+            spos.mfe_r = max(spos.mfe_r, cur_r)
 
-        hit_sl = (spos.side == Side.BUY and px <= spos.sl) or (spos.side == Side.SELL and px >= spos.sl)
-        hit_tp = (spos.side == Side.BUY and px >= spos.tp) or (spos.side == Side.SELL and px <= spos.tp)
-        timed_out = (now_sec - spos.open_time) >= self.config.paper.max_hold_min * 60
+            action, new_sl = evaluate(
+                self._exit_policy(), side=spos.side, entry=spos.entry_price, risk=spos.risk_dist,
+                price=px, peak_r=spos.mfe_r, sl=spos.sl, spread_px=spread_px, commission_px=comm_px,
+            )
+            if spos.tp_stages:
+                peak_px = spos.entry_price + spos.mfe_r * spos.risk_dist if spos.side == Side.BUY else spos.entry_price - spos.mfe_r * spos.risk_dist
+                staged = stage_stop(
+                    side=spos.side, entry=spos.entry_price, stages=spos.tp_stages, peak_price=peak_px,
+                    sl=new_sl if action == "MOVE_SL" else spos.sl, cost_px=spread_px + comm_px,
+                )
+                if staged is not None:
+                    action, new_sl = "MOVE_SL", staged
+            if action == "MOVE_SL":
+                spos.sl = round(new_sl, spec.digits if spec else 5)
+                arena_changed = True
 
-        if hit_sl or hit_tp or timed_out:
-            self.shadow_positions.pop(tk.symbol, None)
+            hit_sl = (spos.side == Side.BUY and px <= spos.sl) or (spos.side == Side.SELL and px >= spos.sl)
+            hit_tp = (spos.side == Side.BUY and px >= spos.tp) or (spos.side == Side.SELL and px <= spos.tp)
+            timed_out = (now_sec - spos.open_time) >= self.config.paper.max_hold_min * 60
+
+            if not (hit_sl or hit_tp or timed_out):
+                continue
+
+            pos_map.pop(tk.symbol, None)
+            arena_changed = True
             comm_r = (comm_px / max(spos.risk_dist, 1e-12)) if comm_px > 0 else 0.04
             net_r = cur_r - comm_r
             size_scale = spos.volume if 0.05 <= spos.volume <= 1.0 else 1.0
-            risk_money = self.shadow_equity * (self.config.risk.risk_per_trade_pct / 100.0) * size_scale
+            base_eq = self.shadow_raw_equity if is_raw else self.shadow_equity
+            risk_money = base_eq * (self.config.risk.risk_per_trade_pct / 100.0) * size_scale
             pnl = round(risk_money * net_r, 2)
-            self.shadow_equity = round(self.shadow_equity + pnl, 2)
+            if is_raw:
+                self.shadow_raw_equity = round(self.shadow_raw_equity + pnl, 2)
+            else:
+                self.shadow_equity = round(self.shadow_equity + pnl, 2)
             in_profit_stop = hit_sl and cur_r > 0
             tr = TradeRecord(
                 is_shadow=True,
@@ -1898,17 +1951,20 @@ class TradingOrchestrator:
                 exit_reason="TP" if hit_tp else ("LOCK" if in_profit_stop else ("SL" if hit_sl else "TIME_EXPIRY")),
             )
             await self.db.save_trade(tr)
+            if not is_raw:
+                transition = self.gate.record_shadow_trade(tr)
+                if transition and self.gate.active_challenger:
+                    await self.db.save_challenger(self.gate.active_challenger)
+                if transition == "PENDING_APPROVAL":
+                    await self._notify("Challenger passed Live Shadow Arena! Ready for /approve on Dashboard or Telegram.")
+                elif transition == "AUTO_PROMOTED":
+                    self.apply_champion_config(self.gate.active_config)
+                    for sn in self.gate.snapshots:
+                        await self.db.save_snapshot(sn)
+                    await self._notify(f"Challenger AUTO-PROMOTED to Champion {self.gate.active_snapshot.version_id}!")
+
+        if arena_changed:
             await self._save_arena()
-            transition = self.gate.record_shadow_trade(tr)
-            if transition and self.gate.active_challenger:
-                await self.db.save_challenger(self.gate.active_challenger)
-            if transition == "PENDING_APPROVAL":
-                await self._notify(f"Challenger passed Live Shadow Arena! Ready for /approve on Dashboard or Telegram.")
-            elif transition == "AUTO_PROMOTED":
-                self.apply_champion_config(self.gate.active_config)
-                for sn in self.gate.snapshots:
-                    await self.db.save_snapshot(sn)
-                await self._notify(f"Challenger AUTO-PROMOTED to Champion {self.gate.active_snapshot.version_id}!")
 
     async def _training_bars(self) -> dict[str, list[Bar]]:
         """Several days of M1 bars per symbol from the database (falls back to the live buffer)."""
@@ -2133,7 +2189,7 @@ class TradingOrchestrator:
             tk = self.ticks.get(sym)
             spec = self.specs.get(sym, DEFAULT_SPECS["XAUUSD"])
             b_list = list(self.bars.get(sym, ()))
-            last_bars = [b.model_dump() for b in b_list[-60:]]
+            last_bars = [b.model_dump() for b in b_list[-110:]]
             atr_approx = max((b_list[-1].high - b_list[-1].low), spec.point * 25) if b_list else spec.point * 50
             sp_atr_pct = round(((tk.spread_points * spec.point) / atr_approx) * 100.0, 1) if tk else 0.0
             radar.append(
@@ -2150,6 +2206,7 @@ class TradingOrchestrator:
                     "readiness": self.readiness.get(sym, 30),
                     "buy_pressure": self.buy_pressure.get(sym, 50),
                     "shield": self.shield_status.get(sym, "CLEAR"),
+                    "ichi_m15": self.ichi_scores.get(sym, 0),
                     "bars": last_bars,
                 }
             )
@@ -2175,6 +2232,7 @@ class TradingOrchestrator:
             "active_thought": self.active_thought,
             "account": self.account.model_dump(),
             "shadow_equity": self.shadow_equity,
+            "shadow_raw_equity": self.shadow_raw_equity,
             "paper": self.paper_snapshot(),
             "hard_guard": self.hard_guard.model_dump(),
             "radar": radar,

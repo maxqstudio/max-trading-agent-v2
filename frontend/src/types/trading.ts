@@ -31,6 +31,7 @@ export interface RadarSymbol {
   readiness: number;
   buy_pressure: number;
   shield: string;
+  ichi_m15?: number;
   bars: Bar[];
 }
 
@@ -163,6 +164,7 @@ export interface LiveStateSnapshot {
   active_thought: string;
   account: AccountState;
   shadow_equity: number;
+  shadow_raw_equity?: number;
   radar: RadarSymbol[];
   positions: LivePosition[];
   decisions: DecisionEvent[];

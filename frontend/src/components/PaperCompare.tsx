@@ -37,6 +37,7 @@ interface Group {
 
 interface Compare {
   rows: Row[];
+  challengers?: Row[];
   ai_cost_today_usd: number;
   note: string;
   learning: { adaptive: boolean; min_samples: number; groups: Group[] };
@@ -49,7 +50,15 @@ interface Compare {
   };
 }
 
-const COLOR: Record<string, string> = { normal: '#F59E0B', hitrun: '#EC4899', raw: '#14B8A6', raw_hitrun: '#A855F7', mt5: '#3B82F6' };
+const COLOR: Record<string, string> = {
+  normal: '#F59E0B',
+  hitrun: '#EC4899',
+  raw: '#14B8A6',
+  raw_hitrun: '#38BDF8',
+  shadow: '#8B5CF6',
+  shadow_raw: '#A3E635',
+  mt5: '#3B82F6',
+};
 const VERDICT: Record<string, string> = {
   APPROVE: 'Approved by AI Supervisor',
   REDUCE: 'Reduced by AI Supervisor',
@@ -162,7 +171,7 @@ export const PaperCompare: React.FC = () => {
             </tr>
           </thead>
           <tbody className="divide-y divide-[#1F2D45] mono">
-            {(data?.rows ?? []).map((r) => (
+            {[...(data?.rows ?? []), ...(data?.challengers ?? [])].map((r) => (
               <tr key={r.book} className={r.book === 'mt5' ? 'text-[#8A9BB5]' : ''}>
                 <td className="py-1.5 px-2 font-sans font-bold whitespace-nowrap" style={{ color: COLOR[r.book] }}>
                   {r.label}

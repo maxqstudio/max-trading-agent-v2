@@ -190,7 +190,7 @@ def create_app(orchestrator: TradingOrchestrator) -> FastAPI:
         # PAPER = Normal paper book, HITRUN = Hit & Run paper book.
         from backend.engine.orchestrator import HITRUN_VERSION, PAPER_VERSION, RAW_HITRUN_VERSION, RAW_VERSION
 
-        is_shadow = True if mode == "SHADOW" else (False if mode in ("LIVE", "PAPER", "HITRUN", "RAW", "RAW_HITRUN") else None)
+        is_shadow = True if mode in ("SHADOW", "SHADOW_RAW") else (False if mode in ("LIVE", "PAPER", "HITRUN", "RAW", "RAW_HITRUN") else None)
         sym = None if (not symbol or symbol == "ALL") else symbol
         trades = await orchestrator.db.list_trades(
             limit=limit,
@@ -204,6 +204,10 @@ def create_app(orchestrator: TradingOrchestrator) -> FastAPI:
             }.get(mode),
             exclude_version_prefix="PAPER" if mode == "LIVE" else None,
         )
+        if mode == "SHADOW":
+            trades = [t for t in trades if not t.version_id.endswith("-raw")]
+        elif mode == "SHADOW_RAW":
+            trades = [t for t in trades if t.version_id.endswith("-raw")]
 
         # Hourly UTC expectancy breakdown
         hourly_r: dict[int, list[float]] = {h: [] for h in range(24)}
