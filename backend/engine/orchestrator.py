@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from backend.bridge.state_machine import IdempotentOrderStateMachine
@@ -63,6 +63,23 @@ class ShadowPosition:
     mae_r: float = 0.0
     mfe_r: float = 0.0
     version_id: str = "shadow"
+    volume: float = 0.10
+
+
+PAPER_VERSION = "PAPER"
+PAPER_MAX_HOLD_SEC = 4 * 3600
+PAPER_START_EQUITY = 10000.0
+
+
+def _pos_to_dict(p: ShadowPosition) -> dict[str, Any]:
+    return {**asdict(p), "side": p.side.value, "regime": p.regime.value}
+
+
+def _pos_from_dict(d: dict[str, Any]) -> ShadowPosition | None:
+    try:
+        return ShadowPosition(**{**d, "side": Side(d["side"]), "regime": MarketRegime(d["regime"])})
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _supervisor_settings(cfg: TradingConfig) -> SupervisorSettings:
@@ -150,6 +167,10 @@ class TradingOrchestrator:
         # Parallel Live Shadow Arena
         self.shadow_positions: dict[str, ShadowPosition] = {}
         self.shadow_equity: float = 10000.0
+        # Paper trading (SHADOW_ONLY mode): the champion's approved trades, filled virtually.
+        self.paper_positions: dict[str, ShadowPosition] = {}
+        self.paper_equity: float = PAPER_START_EQUITY
+        self._tracking_sig: tuple[int, ...] = ()
         self.shadow_suite: StrategySuite = StrategySuite.from_config(config)
 
         # Async callbacks / subscribers (Telegram + WebSocket)
@@ -189,7 +210,24 @@ class TradingOrchestrator:
                     self.shadow_suite = StrategySuite.from_config(TradingConfig.model_validate(c.config_snapshot))
                     break
 
-        saved_decs = await self.db.list_decisions(limit=50)
+        arena = await self.db.get_kv("shadow_arena")
+        if arena:
+            self.shadow_equity = float(arena.get("equity", self.shadow_equity))
+            for d in arena.get("positions", []):
+                p = _pos_from_dict(d)
+                if p:
+                    self.shadow_positions[p.symbol] = p
+        paper = await self.db.get_kv("paper_book")
+        if paper:
+            self.paper_equity = float(paper.get("equity", self.paper_equity))
+            for d in paper.get("positions", []):
+                p = _pos_from_dict(d)
+                if p:
+                    self.paper_positions[p.symbol] = p
+        self.order_sm.import_tracking(await self.db.get_kv("mt5_tracking"))
+        self._tracking_sig = tuple(sorted(self.order_sm.active_positions))
+
+        saved_decs = await self.db.list_decisions(limit=120)
         for ev in reversed(saved_decs):
             self.recent_decisions.appendleft(ev)
 
@@ -296,6 +334,12 @@ class TradingOrchestrator:
             self.gate.active_snapshot.version_id,
             now_sec,
         )
+        # Persist what we know about open MT5 positions whenever the set changes, so a position
+        # that closes while the bot is off is still recorded on the next start.
+        sig = tuple(sorted(self.order_sm.active_positions))
+        if sig != self._tracking_sig:
+            self._tracking_sig = sig
+            await self.db.set_kv("mt5_tracking", self.order_sm.export_tracking(), now_ms)
 
         # 3. Online learning on every newly closed live trade (RL-1 Bandit + RL-2 Exit + Rollback Guard)
         for tr in closed_trades:
@@ -353,6 +397,7 @@ class TradingOrchestrator:
                 delta = 3 if tk.bid > prev.bid else (-3 if tk.bid < prev.bid else 0)
                 self.buy_pressure[tk.symbol] = max(18, min(84, cur_p + delta))
             await self._update_shadow_positions_on_tick(tk, now_sec)
+            await self._update_paper_positions_on_tick(tk, now_sec)
 
         # 5. Ingest newly closed bars & run full 4-Pillar AI scan on closed bars
         if req.closed_bars:
@@ -615,10 +660,11 @@ class TradingOrchestrator:
                     tag="SHADOW ONLY",
                     strategy_id=best_sig.strategy_id,
                     side=best_sig.side.value,
-                    message=f"Validated setup ({risk_dec.volume} lot, ML {ml_prob:.0%}, DL {dl_align:.0%}) — live dispatch muted in SHADOW_ONLY{note}",
+                    message=f"Paper trade {best_sig.side.value} {risk_dec.volume} lot (ML {ml_prob:.0%}, DL {dl_align:.0%}) — no MT5 order in SHADOW_ONLY{note}",
                     latency_ms=lat_ms,
                 )
             )
+            await self._open_paper_position(sym, best_sig, risk_dec, assess, spec, ml_prob, dl_align, spread_pts)
             return
 
         # Dispatch idempotent OrderCommand to MT5 EA
@@ -662,6 +708,121 @@ class TradingOrchestrator:
                     latency_ms=lat_ms,
                 )
             )
+
+    async def _save_arena(self) -> None:
+        await self.db.set_kv(
+            "shadow_arena",
+            {"equity": self.shadow_equity, "positions": [_pos_to_dict(p) for p in self.shadow_positions.values()]},
+            utc_now_ms(),
+        )
+
+    async def _save_paper(self) -> None:
+        await self.db.set_kv(
+            "paper_book",
+            {"equity": self.paper_equity, "positions": [_pos_to_dict(p) for p in self.paper_positions.values()]},
+            utc_now_ms(),
+        )
+
+    async def _open_paper_position(
+        self, sym: str, sig: Any, risk_dec: Any, assess: Any, spec: SymbolSpec,
+        ml_prob: float, dl_align: float, spread_pts: float,
+    ) -> None:
+        """Fill an approved SHADOW_ONLY trade virtually at the current bid/ask (one per symbol)."""
+        tick = self.ticks.get(sym)
+        if sym in self.paper_positions or tick is None or risk_dec.volume <= 0:
+            return
+        entry = tick.ask if sig.side == Side.BUY else tick.bid
+        sl, tp = risk_dec.adjusted_sl, risk_dec.adjusted_tp
+        self.paper_positions[sym] = ShadowPosition(
+            symbol=sym,
+            strategy_id=sig.strategy_id,
+            regime=assess.regime,
+            side=sig.side,
+            entry_price=round(entry, spec.digits),
+            sl=sl,
+            tp=tp,
+            risk_dist=max(abs(entry - sl), spec.point),
+            open_time=int(utc_now_ms() // 1000),
+            ml_conf=ml_prob,
+            dl_conf=dl_align,
+            spread_pts=spread_pts,
+            version_id=PAPER_VERSION,
+            volume=risk_dec.volume,
+        )
+        await self._save_paper()
+
+    def _paper_money(self, p: ShadowPosition, exit_px: float) -> float:
+        spec = self.specs.get(p.symbol)
+        move = (exit_px - p.entry_price) if p.side == Side.BUY else (p.entry_price - exit_px)
+        if spec is None or spec.tick_size <= 0:
+            return 0.0
+        return round(move / spec.tick_size * spec.tick_value * p.volume, 2)
+
+    async def _update_paper_positions_on_tick(self, tk: TickSnapshot, now_sec: int) -> None:
+        p = self.paper_positions.get(tk.symbol)
+        if p is None:
+            return
+        px = tk.bid if p.side == Side.BUY else tk.ask
+        cur_r = ((px - p.entry_price) if p.side == Side.BUY else (p.entry_price - px)) / max(p.risk_dist, 1e-12)
+        p.mae_r = min(p.mae_r, cur_r)
+        p.mfe_r = max(p.mfe_r, cur_r)
+        hit_sl = p.sl > 0 and ((p.side == Side.BUY and px <= p.sl) or (p.side == Side.SELL and px >= p.sl))
+        hit_tp = p.tp > 0 and ((p.side == Side.BUY and px >= p.tp) or (p.side == Side.SELL and px <= p.tp))
+        timed_out = now_sec - p.open_time >= PAPER_MAX_HOLD_SEC
+        if not (hit_sl or hit_tp or timed_out):
+            return
+        self.paper_positions.pop(tk.symbol, None)
+        pnl = self._paper_money(p, px)
+        self.paper_equity = round(self.paper_equity + pnl, 2)
+        reason = "TP" if hit_tp else ("SL" if hit_sl else "TIME_EXPIRY")
+        await self.db.save_trade(
+            TradeRecord(
+                is_shadow=False,
+                version_id=PAPER_VERSION,
+                symbol=p.symbol,
+                strategy_id=p.strategy_id,
+                regime=p.regime,
+                side=p.side,
+                volume=p.volume,
+                entry_price=p.entry_price,
+                exit_price=px,
+                sl_price=p.sl,
+                tp_price=p.tp,
+                open_time=p.open_time,
+                close_time=now_sec,
+                pnl_money=pnl,
+                pnl_r=round(cur_r, 4),
+                mae_r=round(p.mae_r, 4),
+                mfe_r=round(p.mfe_r, 4),
+                spread_at_entry=p.spread_pts,
+                ml_confidence=p.ml_conf,
+                dl_confidence=p.dl_conf,
+                exit_reason=reason,
+            )
+        )
+        await self._save_paper()
+        await self._log_decision(
+            DecisionEvent(
+                symbol=p.symbol,
+                category="EXEC",
+                tag=f"PAPER {reason}",
+                strategy_id=p.strategy_id,
+                side=p.side.value,
+                message=f"Paper {p.side.value} {p.volume} lot closed @ {px} ({cur_r:+.2f}R, ${pnl:+.2f}). Paper equity ${self.paper_equity:,.2f}",
+            )
+        )
+
+    def paper_snapshot(self) -> dict[str, Any]:
+        out = []
+        for p in self.paper_positions.values():
+            tk = self.ticks.get(p.symbol)
+            px = (tk.bid if p.side == Side.BUY else tk.ask) if tk else p.entry_price
+            out.append({
+                "symbol": p.symbol, "side": p.side.value, "volume": p.volume, "entry_price": p.entry_price,
+                "current_price": px, "sl": p.sl, "tp": p.tp, "strategy_id": p.strategy_id,
+                "profit": self._paper_money(p, px), "open_time": p.open_time,
+            })
+        return {"equity": self.paper_equity, "positions": out}
 
     async def _manage_open_positions_with_rl_exit(self, now_ms: int) -> None:
         for pos in self.open_positions:
@@ -807,6 +968,7 @@ class TradingOrchestrator:
             spread_pts=spread_pts,
             version_id=cand.version_id if cand else f"{self.config.app.version}-shadow",
         )
+        await self._save_arena()
 
     async def _update_shadow_positions_on_tick(self, tk: TickSnapshot, now_sec: int) -> None:
         spos = self.shadow_positions.get(tk.symbol)
@@ -855,6 +1017,7 @@ class TradingOrchestrator:
                 exit_reason="TP" if hit_tp else ("SL" if hit_sl else "TIME_EXPIRY"),
             )
             await self.db.save_trade(tr)
+            await self._save_arena()
             transition = self.gate.record_shadow_trade(tr)
             if transition and self.gate.active_challenger:
                 await self.db.save_challenger(self.gate.active_challenger)
@@ -1096,6 +1259,7 @@ class TradingOrchestrator:
             "active_thought": self.active_thought,
             "account": self.account.model_dump(),
             "shadow_equity": self.shadow_equity,
+            "paper": self.paper_snapshot(),
             "hard_guard": self.hard_guard.model_dump(),
             "radar": radar,
             "positions": [p.model_dump(mode="json") for p in self.open_positions],

@@ -173,6 +173,25 @@ export interface LiveStateSnapshot {
   entry_block_reason?: string | null;
   supervisor?: SupervisorStatus;
   llm?: LLMBrief;
+  paper?: PaperBook;
+}
+
+export interface PaperPosition {
+  symbol: string;
+  side: 'BUY' | 'SELL';
+  volume: number;
+  entry_price: number;
+  current_price: number;
+  sl: number;
+  tp: number;
+  strategy_id: string;
+  profit: number;
+  open_time: number;
+}
+
+export interface PaperBook {
+  equity: number;
+  positions: PaperPosition[];
 }
 
 export interface SupervisorLast {
