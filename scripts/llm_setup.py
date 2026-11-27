@@ -84,7 +84,15 @@ async def test_connections(chain: list[str]) -> None:
             print(f"  [FAIL] {rp.name}: {str(exc)[:200]}")
 
 
+def configured_providers() -> list[str]:
+    return [r.name for r in load_chain(ENV_FILE) if r.configured]
+
+
 def main() -> int:
+    if "--check" in sys.argv:
+        names = configured_providers()
+        print(", ".join(names) if names else "none")
+        return 0 if names else 1
     print("=" * 64)
     print("  Max Trading Agent v2 — Setup LLM (Claude dulu)")
     print("=" * 64)
