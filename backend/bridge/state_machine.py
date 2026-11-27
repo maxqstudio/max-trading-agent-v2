@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 from backend.core.models import (
     LivePosition,
@@ -71,6 +71,37 @@ class IdempotentOrderStateMachine:
         self.active_positions: dict[int, TrackedPositionMeta] = {}
         self._last_mt5_positions: dict[int, LivePosition] = {}
         self.last_blocked: list[tuple[OrderCommand, str]] = []
+
+    def export_tracking(self) -> dict:
+        """JSON-safe copy of what we know about open MT5 positions (survives a restart)."""
+        return {
+            "active": [{**asdict(m), "side": m.side.value, "regime": m.regime.value, "last_rl_action": m.last_rl_action.value}
+                       for m in self.active_positions.values()],
+            "last": [p.model_dump(mode="json") for p in self._last_mt5_positions.values()],
+        }
+
+    def import_tracking(self, data: dict | None) -> int:
+        """Restore tracking saved before a restart. Positions that closed while we were down are
+        then reported as closed trades on the first MT5 sync instead of being lost."""
+        if not data:
+            return 0
+        for d in data.get("active", []):
+            try:
+                d = dict(d)
+                d["side"] = Side(d["side"])
+                d["regime"] = MarketRegime(d["regime"])
+                d["last_rl_action"] = RLExitAction(d.get("last_rl_action", "HOLD"))
+                meta = TrackedPositionMeta(**d)
+            except (KeyError, TypeError, ValueError):
+                continue
+            self.active_positions[meta.ticket] = meta
+        for d in data.get("last", []):
+            try:
+                pos = LivePosition.model_validate(d)
+            except ValueError:
+                continue
+            self._last_mt5_positions[pos.ticket] = pos
+        return len(self.active_positions)
 
     def has_inflight_open(self, symbol: str) -> bool:
         now = utc_now_ms()

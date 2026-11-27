@@ -46,7 +46,9 @@ export default function App() {
   const dayPnl = state?.account?.daily_pnl ?? 0;
   const ddPct = state?.account?.daily_dd_pct ?? 0;
   const staleBridge = state ? !state.bridge_connected : !wsConnected;
-  const floatingTotal = (state?.positions || []).reduce((acc, p) => acc + p.profit, 0);
+  const paperPositions = state?.paper?.positions || [];
+  const floatingTotal =
+    (state?.positions || []).reduce((acc, p) => acc + p.profit, 0) + paperPositions.reduce((acc, p) => acc + p.profit, 0);
 
   const filteredDecisions = (state?.decisions || []).filter(
     (d) => logFilter === 'ALL' || d.category === logFilter
@@ -252,6 +254,7 @@ export default function App() {
                 </span>
               </div>
               <div className="flex justify-between"><span className="text-[#8A9BB5]">AI Scans</span><span className="mono font-bold">{state?.scans_count ?? 0}</span></div>
+              <div className="flex justify-between"><span className="text-[#8A9BB5]">Paper Eq</span><span className="mono font-bold text-[#F59E0B]">${(state?.paper?.equity ?? 10000).toFixed(0)}</span></div>
               <div className="flex justify-between"><span className="text-[#8A9BB5]">Shadow Eq</span><span className="mono font-bold text-[#8B5CF6]">${(state?.shadow_equity ?? 10000).toFixed(0)}</span></div>
             </div>
           </div>
@@ -332,7 +335,9 @@ export default function App() {
               <div className="grid grid-cols-1 xl:grid-cols-12 gap-3">
                 <div className="xl:col-span-7 cockpit-card rounded-lg flex flex-col">
                   <div className="px-3 py-2 border-b border-[#1F2D45] flex items-center justify-between text-xs">
-                    <span className="font-bold uppercase tracking-wider">Live MT5 Positions ({state?.positions?.length ?? 0})</span>
+                    <span className="font-bold uppercase tracking-wider">
+                      Posisi MT5 ({state?.positions?.length ?? 0}){paperPositions.length ? ` + Paper (${paperPositions.length})` : ''}
+                    </span>
                     <span className={`mono font-bold ${floatingTotal >= 0 ? 'text-[#10B981]' : 'text-[#EF4444]'}`}>
                       Floating: {floatingTotal >= 0 ? '+' : ''}${floatingTotal.toFixed(2)}
                     </span>
@@ -350,7 +355,17 @@ export default function App() {
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-[#1F2D45]">
-                        {(state?.positions || []).length === 0 ? (
+                        {paperPositions.map((p) => (
+                          <tr key={`paper-${p.symbol}`}>
+                            <td className="py-2 px-2"><div className="mono font-bold">{p.symbol} <span className="px-1 rounded bg-[#F59E0B]/15 text-[#F59E0B] text-[10px]">PAPER</span></div><div className="text-[#8A9BB5]">{p.strategy_id}</div></td>
+                            <td className="py-2 px-2 mono"><span className={`px-1.5 py-0.5 rounded font-bold ${p.side === 'BUY' ? 'bg-[#10B981]/15 text-[#10B981]' : 'bg-[#EF4444]/15 text-[#EF4444]'}`}>{p.side}</span> {p.volume}</td>
+                            <td className="py-2 px-2 mono">{p.entry_price} → <b>{p.current_price}</b></td>
+                            <td className={`py-2 px-2 mono font-bold ${p.profit >= 0 ? 'text-[#10B981]' : 'text-[#EF4444]'}`}>{p.profit >= 0 ? '+' : ''}${p.profit.toFixed(2)}</td>
+                            <td className="py-2 px-2 mono text-[#8A9BB5]">SL {p.sl} / TP {p.tp}</td>
+                            <td className="py-2 px-2 text-right text-[#8A9BB5]">virtual</td>
+                          </tr>
+                        ))}
+                        {(state?.positions || []).length === 0 && paperPositions.length === 0 ? (
                           <tr><td colSpan={6} className="py-6 text-center text-[#8A9BB5]">No open positions — AI actively hunting M1 setups...</td></tr>
                         ) : (
                           (state?.positions || []).map((p) => (

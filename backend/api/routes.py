@@ -184,9 +184,19 @@ def create_app(orchestrator: TradingOrchestrator) -> FastAPI:
         mode: str = "ALL",
         symbol: str | None = None,
     ) -> dict[str, Any]:
-        is_shadow = True if mode == "SHADOW" else (False if mode == "LIVE" else None)
+        # LIVE = real MT5 fills (demo or live account), PAPER = virtual SHADOW_ONLY fills,
+        # SHADOW = challenger arena.
+        from backend.engine.orchestrator import PAPER_VERSION
+
+        is_shadow = True if mode == "SHADOW" else (False if mode in ("LIVE", "PAPER") else None)
         sym = None if (not symbol or symbol == "ALL") else symbol
-        trades = await orchestrator.db.list_trades(limit=limit, is_shadow=is_shadow, symbol=sym)
+        trades = await orchestrator.db.list_trades(
+            limit=limit,
+            is_shadow=is_shadow,
+            symbol=sym,
+            version_id=PAPER_VERSION if mode == "PAPER" else None,
+            exclude_version_id=PAPER_VERSION if mode == "LIVE" else None,
+        )
 
         # Hourly UTC expectancy breakdown
         hourly_r: dict[int, list[float]] = {h: [] for h in range(24)}
