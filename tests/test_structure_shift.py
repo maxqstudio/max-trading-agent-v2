@@ -134,7 +134,7 @@ def test_meta_features_and_old_models():
     sig = SimpleNamespace(regime=MarketRegime.RANGING, strategy_id="structure_shift", side=Side.BUY, confidence=0.7)
     snap = compute_indicator_snapshot(bars)
     v = extract_meta_features(sig, snap, 0.1, DLPrediction(), bars[-1].timestamp, structure=ctx)
-    assert len(v) == len(META_FEATURE_NAMES) == 41
+    assert len(v) == len(META_FEATURE_NAMES) == 46
     assert list(v[5:9]) == [0.0, 0.0, 0.0, 0.0] and v[29] == 1.0  # its own column at the end
     assert v[33] in (-1.0, 0.0, 1.0)
     old = CalibratedMetaLabeler()

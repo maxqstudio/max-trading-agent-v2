@@ -143,4 +143,6 @@ def test_strategy_suite_loads_all_scalping_strategies() -> None:
         "ema_vwap_pullback",
         "tick_imbalance",
         "structure_shift",
+        "day_range_reversal",
+        "band_reversion",
     }

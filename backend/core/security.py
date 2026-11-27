@@ -39,6 +39,9 @@ HARD_SAFETY_BOUNDS: dict[str, tuple[float, float]] = {
     "strategies.structure_shift.sl_buffer_atr": (0.05, 0.80),
     "strategies.structure_shift.retest_min": (0.236, 0.618),
     "strategies.structure_shift.target_stage": (1.0, 3.0),
+    "strategies.day_range_reversal.sl_buffer_atr": (0.05, 0.80),
+    "strategies.day_range_reversal.tp_rr": (1.0, 3.0),
+    "strategies.band_reversion.sl_buffer_atr": (0.05, 0.80),
 }
 
 INTEGER_PATHS: set[str] = {

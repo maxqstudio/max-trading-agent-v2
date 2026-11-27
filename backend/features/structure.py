@@ -13,7 +13,8 @@ import numpy as np
 
 from backend.core.models import Bar
 from backend.features import ichimoku
-from backend.features.indicators import atr, bollinger
+from backend.features.daylevels import range_position
+from backend.features.indicators import atr, bollinger, ema, stochastic
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,10 +116,13 @@ def sd_zones(
 CONTEXT_KEYS = (
     "demand_near", "supply_near", "kumo", "bb_pos", "engulf",
     "ichi_score", "ichi_m15", "ichi_tk_cross", "ichi_chikou", "ichi_future_cloud", "ichi_thick_atr", "ichi_kijun_dist_atr",
+    "ema20_100", "stoch", "prev_day_pos",
 )
 
 
-def structure_context(bars: list[Bar], ichi_m15: int | None = None) -> dict[str, float]:
+def structure_context(
+    bars: list[Bar], ichi_m15: int | None = None, prev_day: tuple[float, float] | None = None,
+) -> dict[str, float]:
     """Direction-neutral context at the last bar. ``extract_meta_features`` turns it into
     with-the-trade / against-the-trade values. ``ichi_m15`` is the M15 Ichimoku checklist score
     (computed from a longer M1 history than ``bars``); None leaves it at 0."""
@@ -153,6 +157,15 @@ def structure_context(bars: list[Bar], ichi_m15: int | None = None) -> dict[str,
     up, mid, _ = bollinger(c[-40:], 20, 2.0)
     half = max(float(up[-1] - mid[-1]), 1e-9)
     out["bb_pos"] = float(np.clip((px - float(mid[-1])) / half, -1.5, 1.5))
+    # Trend as the trend-follower rules read it: EMA 20 against EMA 100, both sloping the same way.
+    e20, e100 = ema(c, 20), ema(c, 100)
+    if len(c) >= 110:
+        side = 1.0 if e20[-1] > e100[-1] else -1.0
+        sloped = (e20[-1] - e20[-6]) * side > 0 and (e100[-1] - e100[-6]) * side > 0
+        out["ema20_100"] = side if sloped else side * 0.5
+    k, _ = stochastic(h[-40:], lo[-40:], c[-40:], 14, 3, 3)
+    out["stoch"] = float((k[-1] - 50.0) / 50.0)  # +1 = overbought end, -1 = oversold end
+    out["prev_day_pos"] = range_position(px, prev_day)
     for i in range(len(c) - 1, len(c) - 4, -1):
         e = engulfing_at(o, c, i)
         if e:
@@ -165,6 +178,7 @@ ALIGNED_NAMES = (
     "sd_zone_align", "kumo_align", "bb_pos_align", "engulf_align",
     "ichi_score_align", "ichi_m15_align", "ichi_tk_cross_align", "ichi_chikou_align", "ichi_future_cloud_align",
     "ichi_cloud_thick_atr", "ichi_kijun_dist_align",
+    "ema20_100_align", "stoch_align", "prev_day_pos_align",
 )
 
 
@@ -187,4 +201,7 @@ def aligned_context(ctx: dict[str, float] | None, side_sign: float) -> list[floa
         float(ctx.get("ichi_future_cloud", 0.0) * side_sign),
         float(ctx.get("ichi_thick_atr", 0.0)),
         float(ctx.get("ichi_kijun_dist_atr", 0.0) * side_sign),
+        float(ctx.get("ema20_100", 0.0) * side_sign),
+        float(ctx.get("stoch", 0.0) * side_sign),
+        float(ctx.get("prev_day_pos", 0.0) * side_sign),
     ]

@@ -46,6 +46,7 @@ from backend.evolution.sequence_net import SequenceConvNet
 from backend.features.dataset import build_sequence_tensor, extract_meta_features
 from backend.features.htf import alignment, htf_bias, session_of
 from backend.features import ichimoku
+from backend.features.daylevels import prev_day_range
 from backend.features.structure import structure_context
 from backend.features.regime import classify_regime
 from backend.risk.manager import DEFAULT_SPECS, PortfolioRiskManager
@@ -91,7 +92,7 @@ PAPER_LABELS: dict[str, str] = {"normal": "Normal", "hitrun": "Hit & Run", "raw"
 VETOED_BOOKS = ("normal", "hitrun")
 VETO_KEYS = ("APPROVE", "REDUCE", "REJECT", "NONE")
 PAPER_START_EQUITY = 10000.0
-BAR_BUFFER = 2000  # M1 bars kept per symbol: about 33 hours, enough for the H1 direction
+BAR_BUFFER = 3000  # M1 bars kept per symbol: about 50 hours (H1 direction, M15 Ichimoku, yesterday's range)
 SIGNAL_BARS = 600  # what the strategies, regime and models look at
 
 
@@ -559,14 +560,17 @@ class TradingOrchestrator:
             self.active_thought = f"{sym} shielded ({verdict.reason_code}): {verdict.detail}"
             return
 
-        # Scan 4 Scalping Micro-Strategies
-        signals = self.suite.scan_all(sym, bar_list, assess.indicators, assess.regime)
-
-        # Also evaluate Challenger in parallel Live Shadow Arena!
+        # Market facts from the full buffer: M15/H1 direction, M15 Ichimoku, yesterday's range
         htf = (htf_bias(all_bars, 15), htf_bias(all_bars, 60))
         ichi_m15 = ichimoku.htf_score(all_bars, 15)  # M15 Ichimoku checklist, needs ~26 h of M1 bars
+        prev_day = prev_day_range(all_bars)
+        mkt = {"prev_day": prev_day, "htf_m15": htf[0], "htf_h1": htf[1]}
+
+        signals = self.suite.scan_all(sym, bar_list, assess.indicators, assess.regime, context=mkt)
+
+        # Also evaluate Challenger in parallel Live Shadow Arena!
         await self._scan_shadow_challenger(
-            sym, bar_list, assess.indicators, assess.regime, dl_pred, spread_pts, spec, now_sec, htf, ichi_m15,
+            sym, bar_list, assess.indicators, assess.regime, dl_pred, spread_pts, spec, now_sec, htf, ichi_m15, prev_day,
         )
 
         if not signals:
@@ -589,7 +593,7 @@ class TradingOrchestrator:
         spread_price = spread_pts * spec.point
         feat_vec = extract_meta_features(
             best_sig, assess.indicators, spread_price, dl_pred, bar.timestamp, htf=htf, server_offset_sec=self.server_offset_sec,
-            structure=structure_context(bar_list, ichi_m15),
+            structure=structure_context(bar_list, ichi_m15, prev_day),
         )
         side_sign = 1.0 if best_sig.side == Side.BUY else -1.0
         entry_ctx = {
@@ -1444,12 +1448,13 @@ class TradingOrchestrator:
         now_sec: int,
         htf: tuple[int, int] = (0, 0),
         ichi_m15: int = 0,
+        prev_day: tuple[float, float] | None = None,
     ) -> None:
         if sym in self.shadow_positions:
             return
         cand = self.gate.active_challenger
         shadow_cfg = TradingConfig.model_validate(cand.config_snapshot) if cand else self.config
-        sigs = self.shadow_suite.scan_all(sym, bars, snap, regime)
+        sigs = self.shadow_suite.scan_all(sym, bars, snap, regime, context={"prev_day": prev_day, "htf_m15": htf[0], "htf_h1": htf[1]})
         if not sigs:
             return
         best = max(sigs, key=lambda s: s.confidence)
@@ -1458,7 +1463,7 @@ class TradingOrchestrator:
             return
         feat = extract_meta_features(
             best, snap, spread_px, dl_pred, bars[-1].timestamp, htf=htf, server_offset_sec=self.server_offset_sec,
-            structure=structure_context(bars, ichi_m15),
+            structure=structure_context(bars, ichi_m15, prev_day),
         )
         ml_p = self.ml_labeler.predict_win_probability(feat)
         if ml_p < shadow_cfg.ai.ml_min_probability:

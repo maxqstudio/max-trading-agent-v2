@@ -13,6 +13,8 @@ DEFAULT_STRATEGIES = [
     "ema_vwap_pullback",
     "tick_imbalance",
     "structure_shift",
+    "day_range_reversal",
+    "band_reversion",
 ]
 
 
