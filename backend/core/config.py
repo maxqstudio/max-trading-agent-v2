@@ -14,9 +14,12 @@ from backend.core.models import TradingMode
 class AppConfig(BaseModel):
     name: str = "Max Trading Agent v2"
     version: str = "v1.0"
-    trading_mode: TradingMode = TradingMode.MT5_DEMO
+    # Paper trading by default: validated setups are logged and tracked in the
+    # Shadow Arena, but nothing is sent to MT5 until the operator switches mode.
+    trading_mode: TradingMode = TradingMode.SHADOW_ONLY
     auto_promote_challenger: bool = False
     database_path: str = "data/max_agent.db"
+    kill_switch_path: str = "data/kill_switch.json"
     snapshots_dir: str = "data/snapshots"
     host: str = "127.0.0.1"
     port: int = 8765
@@ -101,7 +104,12 @@ class TradingConfig(BaseModel):
 class EnvSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    bridge_auth_token: str = "mta2_dev_change_me_to_random_secret_32chars"
+    # Shared secret between this server and the MT5 EA. Empty / placeholder = bridge refuses all syncs.
+    bridge_auth_token: str = ""
+    # Secret required by the dashboard & any API call that changes state (mode, risk, kill...).
+    control_api_token: str = ""
+    # Real-money switch. Only settable in .env, never from the dashboard, Telegram or the LLM.
+    allow_live_trading: bool = False
     llm_provider: str = "deterministic"
     gemini_api_key: str = ""
     openai_api_key: str = ""

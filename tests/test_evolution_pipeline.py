@@ -112,7 +112,7 @@ def test_deterministic_reflector_and_champion_gate_promote_and_auto_rollback() -
         for _ in range(4)
     ]
 
-    reflector = LLMReflectionAnalyst(EnvSettings(llm_provider="deterministic"))
+    reflector = LLMReflectionAnalyst(EnvSettings(llm_provider="deterministic", _env_file=None))
     report = reflector.deterministic_reflect(trades, cfg)
     assert len(report.patches) >= 1
 

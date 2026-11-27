@@ -103,16 +103,26 @@ export default function App() {
           </div>
 
           <select
-            value={state?.trading_mode || 'MT5_DEMO'}
+            value={state?.trading_mode || 'SHADOW_ONLY'}
             onChange={async (e) => {
-              await api.setMode(e.target.value);
-              showToast(`Mode switched to ${e.target.value}`);
+              const next = e.target.value;
+              let code = '';
+              if (next === 'MT5_LIVE') {
+                code = (window.prompt('UANG SUNGGUHAN. Ketik LIVE untuk konfirmasi:') || '').trim();
+                if (code.toUpperCase() !== 'LIVE') return;
+              }
+              try {
+                await api.setMode(next, code);
+                showToast(`Mode switched to ${next}`);
+              } catch (err) {
+                showToast(`Mode change refused: ${(err as Error).message}`);
+              }
             }}
             className="mono text-xs font-bold px-2.5 py-1.5 rounded-md cockpit-card cursor-pointer focus:outline-none"
           >
-            <option value="MT5_DEMO">MT5 DEMO</option>
+            <option value="SHADOW_ONLY">SHADOW ONLY (paper)</option>
             <option value="SIMULATOR">SIMULATOR</option>
-            <option value="SHADOW_ONLY">SHADOW ONLY</option>
+            <option value="MT5_DEMO">MT5 DEMO</option>
             <option value="MT5_LIVE">MT5 LIVE</option>
           </select>
 
@@ -170,6 +180,13 @@ export default function App() {
 
           <button
             onClick={async () => {
+              if (state?.killed) {
+                const code = (window.prompt('Kill switch aktif. Ketik RELEASE untuk melepasnya (engine tetap PAUSE):') || '').trim();
+                if (code.toUpperCase() !== 'RELEASE') return;
+                await api.releaseKill(code);
+                showToast('Kill switch released — engine still PAUSED');
+                return;
+              }
               const r = await api.togglePause();
               showToast(r.paused ? 'Engine PAUSED' : 'Engine RESUMED');
             }}

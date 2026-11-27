@@ -30,14 +30,14 @@ def ensure_env_and_token() -> str:
             flags=re.MULTILINE,
         )
         ENV_FILE.write_text(content, encoding="utf-8")
-        print(f"[OK] Created .env with auto-generated BRIDGE_AUTH_TOKEN ({token[:12]}...)")
+        print(f"[OK] Created .env with auto-generated BRIDGE_AUTH_TOKEN (...{token[-4:]})")
         return token
 
     content = ENV_FILE.read_text(encoding="utf-8")
-    m = re.search(r"^BRIDGE_AUTH_TOKEN=(.+)$", content, flags=re.MULTILINE)
+    m = re.search(r"^BRIDGE_AUTH_TOKEN=(.*)$", content, flags=re.MULTILINE)
     if m and m.group(1).strip() and "change_me" not in m.group(1):
         token = m.group(1).strip()
-        print(f"[OK] Existing .env found with BRIDGE_AUTH_TOKEN ({token[:12]}...)")
+        print(f"[OK] Existing .env found with BRIDGE_AUTH_TOKEN (...{token[-4:]})")
         return token
 
     token = f"mta2_{secrets.token_hex(20)}"
@@ -46,7 +46,26 @@ def ensure_env_and_token() -> str:
     else:
         content += f"\nBRIDGE_AUTH_TOKEN={token}\n"
     ENV_FILE.write_text(content, encoding="utf-8")
-    print(f"[OK] Updated .env with secure BRIDGE_AUTH_TOKEN ({token[:12]}...)")
+    print(f"[OK] Updated .env with secure BRIDGE_AUTH_TOKEN (...{token[-4:]})")
+    return token
+
+
+def ensure_control_token() -> str:
+    """Generate CONTROL_API_TOKEN (dashboard/API secret) if missing. Never printed in full."""
+    content = ENV_FILE.read_text(encoding="utf-8")
+    m = re.search(r"^CONTROL_API_TOKEN=(.*)$", content, flags=re.MULTILINE)
+    if m and len(m.group(1).strip()) >= 24 and "change_me" not in m.group(1):
+        print(f"[OK] Existing CONTROL_API_TOKEN found (...{m.group(1).strip()[-4:]})")
+        return m.group(1).strip()
+    token = f"mtc2_{secrets.token_urlsafe(24)}"
+    if m:
+        content = re.sub(r"^CONTROL_API_TOKEN=.*$", f"CONTROL_API_TOKEN={token}", content, flags=re.MULTILINE)
+    else:
+        content += f"\nCONTROL_API_TOKEN={token}\n"
+    if not re.search(r"^ALLOW_LIVE_TRADING=", content, flags=re.MULTILINE):
+        content += "ALLOW_LIVE_TRADING=false\n"
+    ENV_FILE.write_text(content, encoding="utf-8")
+    print("[OK] Generated CONTROL_API_TOKEN in .env — paste it into the dashboard the first time it asks.")
     return token
 
 
@@ -180,7 +199,7 @@ def print_ready_summary(token: str, deployed: list[Path], tests_ok: bool) -> Non
     banner("5/5. READY FOR TESTING!")
     print(f"  Tests Status     : {'ALL PASSED' if tests_ok else 'FAILED (check output above)'}")
     print(f"  MT5 EA Deployed  : {len(deployed)} terminal(s)")
-    print(f"  Bridge Token     : {token}")
+    print(f"  Bridge Token     : ...{token[-4:]} (lengkapnya ada di file .env)")
     print("")
     print("  [MODE A — Uji Cepat Simulator (Tanpa MT5)]")
     print("    -> Double-click: start_simulator.bat")
@@ -198,6 +217,7 @@ def print_ready_summary(token: str, deployed: list[Path], tests_ok: bool) -> Non
 
 def main() -> int:
     token = ensure_env_and_token()
+    ensure_control_token()
     venv_py = check_python_and_frontend()
     deployed = deploy_and_compile_mt5_ea(token)
     tests_ok = run_automated_tests(venv_py)

@@ -70,6 +70,7 @@ class IdempotentOrderStateMachine:
         self._seen_ids: set[str] = set()
         self.active_positions: dict[int, TrackedPositionMeta] = {}
         self._last_mt5_positions: dict[int, LivePosition] = {}
+        self.last_blocked: list[tuple[OrderCommand, str]] = []
 
     def has_inflight_open(self, symbol: str) -> bool:
         now = utc_now_ms()
@@ -118,13 +119,27 @@ class IdempotentOrderStateMachine:
         self._queue.append(cmd)
         return True
 
-    def pop_commands_for_dispatch(self, now_ms: int | None = None) -> list[OrderCommand]:
+    def pop_commands_for_dispatch(
+        self,
+        now_ms: int | None = None,
+        block_entries_reason: str | None = None,
+    ) -> list[OrderCommand]:
+        """Pop queued commands for the EA.
+
+        If ``block_entries_reason`` is set, every OPEN command is marked REJECTED and
+        withheld (recorded in ``last_blocked``); exits/modifies/flatten still go out.
+        """
         now = now_ms if now_ms is not None else utc_now_ms()
         out: list[OrderCommand] = []
+        self.last_blocked: list[tuple[OrderCommand, str]] = []
         while self._queue:
             cmd = self._queue.popleft()
             rec = self._orders.get(cmd.client_order_id)
             if rec is None:
+                continue
+            if cmd.action == OrderAction.OPEN and block_entries_reason:
+                rec.status = OrderStatus.REJECTED
+                self.last_blocked.append((cmd, block_entries_reason))
                 continue
             if cmd.action == OrderAction.OPEN and now > cmd.expires_at_ms:
                 rec.status = OrderStatus.EXPIRED

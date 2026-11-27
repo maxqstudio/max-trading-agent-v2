@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from backend.bridge.state_machine import IdempotentOrderStateMachine
+from backend.core.safety import KillSwitchStore, entry_block_reason
 from backend.core.config import EnvSettings, TradingConfig
 from backend.core.models import (
     AccountState,
@@ -103,6 +104,12 @@ class TradingOrchestrator:
         # Subsystems
         self.shields = MarketShields(config.shields)
         self.risk = PortfolioRiskManager(config.risk)
+        # Persistent kill switch: survives restarts and crashes.
+        self.kill_store = KillSwitchStore(config.app.kill_switch_path)
+        self.kill_state = self.kill_store.load()
+        if self.kill_state.engaged:
+            self.risk.killed = True
+            self.risk.paused = True
         self.order_sm = IdempotentOrderStateMachine(order_ttl_ms=config.instruments.order_ttl_ms)
         self.suite = StrategySuite.from_config(config)
 
@@ -303,7 +310,20 @@ class TradingOrchestrator:
                 self.account.daily_dd_pct,
             )
 
-        commands = self.order_sm.pop_commands_for_dispatch(now_ms)
+        commands = self.order_sm.pop_commands_for_dispatch(
+            now_ms, block_entries_reason=self.entry_block_reason()
+        )
+        for blocked_cmd, why in self.order_sm.last_blocked:
+            await self._log_decision(
+                DecisionEvent(
+                    symbol=blocked_cmd.symbol,
+                    category="BLOCK",
+                    tag="SAFETY RAIL",
+                    strategy_id=blocked_cmd.strategy_id,
+                    side=blocked_cmd.side.value if blocked_cmd.side else "",
+                    message=f"Entry {blocked_cmd.client_order_id} withheld: {why}",
+                )
+            )
         self.bridge_latency_ms = round((time.perf_counter() - t0) * 1000.0, 2)
 
         # Broadcast live frame to WebSocket dashboards
@@ -751,9 +771,25 @@ class TradingOrchestrator:
         finally:
             self.evolution_running = False
 
+    def entry_block_reason(self) -> str | None:
+        """Final, non-tunable gate checked right before any OPEN command leaves for MT5."""
+        return entry_block_reason(
+            mode=self.config.app.trading_mode,
+            account_is_demo=self.account.is_demo,
+            allow_live_trading=self.env.allow_live_trading,
+            killed=self.risk.killed,
+        )
+
+    def release_kill_switch(self) -> None:
+        """Clear the kill lock. The engine stays PAUSED until the operator resumes it."""
+        self.kill_state = self.kill_store.release()
+        self.risk.killed = False
+        self.risk.paused = True
+
     async def trigger_flatten_all(self, reason: str = "MANUAL_KILL") -> None:
         self.risk.killed = True
         self.risk.paused = True
+        self.kill_state = self.kill_store.engage(reason)
         now_ms = utc_now_ms()
         self.order_sm.enqueue(
             OrderCommand(
@@ -793,6 +829,11 @@ class TradingOrchestrator:
 
     async def force_demo_signal(self, symbol: str) -> dict[str, Any]:
         """Allow operator in Simulator/Demo mode to trigger a live validated signal immediately."""
+        # This path bypasses the risk manager, so it is only allowed on simulated/demo money.
+        if self.config.app.trading_mode == TradingMode.MT5_LIVE or not self.account.is_demo:
+            return {"ok": False, "reason": "Demo signal is disabled on live / real-money accounts"}
+        if self.risk.killed:
+            return {"ok": False, "reason": "Kill switch active"}
         sym = symbol if symbol in self.specs else self.config.instruments.symbols[0]
         spec = self.specs[sym]
         tick = self.ticks.get(sym)
@@ -878,6 +919,9 @@ class TradingOrchestrator:
             "auto_promote": self.config.app.auto_promote_challenger,
             "paused": self.risk.paused,
             "killed": self.risk.killed,
+            "kill_reason": self.kill_state.reason if self.risk.killed else "",
+            "live_trading_enabled": self.env.allow_live_trading,
+            "entry_block_reason": self.entry_block_reason(),
             "evolution_running": self.evolution_running,
             "bridge_connected": stale_sec < 6.0,
             "bridge_stale_sec": stale_sec,

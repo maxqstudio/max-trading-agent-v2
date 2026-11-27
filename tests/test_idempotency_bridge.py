@@ -117,6 +117,11 @@ def test_reconciliation_tracks_mae_mfe_and_detects_closed_trades_and_crash_recov
 
 
 def test_bridge_token_verification() -> None:
-    assert verify_bridge_token("secret123", "secret123") is True
-    assert verify_bridge_token("wrong", "secret123") is False
-    assert verify_bridge_token(None, "secret123") is False
+    strong = "mta2_" + "ab12" * 8
+    assert verify_bridge_token(strong, strong) is True
+    assert verify_bridge_token("wrong", strong) is False
+    assert verify_bridge_token(None, strong) is False
+    # Weak or published placeholder expected tokens are refused even on an exact match
+    assert verify_bridge_token("secret123", "secret123") is False
+    ph = "mta2_dev_change_me_to_random_secret_32chars"
+    assert verify_bridge_token(ph, ph) is False

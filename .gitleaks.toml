@@ -1,0 +1,21 @@
+title = "max-trading-agent-v2 gitleaks config"
+
+[extend]
+useDefault = true
+
+# Extra rules for secrets this project handles
+[[rules]]
+id = "mta2-bridge-or-control-token"
+description = "Max Trading Agent bridge/control token assigned a real value"
+regex = '''(?i)(BRIDGE_AUTH_TOKEN|CONTROL_API_TOKEN)\s*=\s*['"]?(mt[ac]2_[A-Za-z0-9_\-]{20,})'''
+secretGroup = 2
+
+[[rules]]
+id = "telegram-bot-token"
+description = "Telegram bot token"
+regex = '''\b[0-9]{8,10}:[A-Za-z0-9_\-]{35}\b'''
+
+[allowlist]
+description = "Test fixtures and the published placeholder"
+regexes = ['''mta2_dev_change_me_to_random_secret_32chars''', '''test_[a-z_]+_secret_token''']
+paths = ['''tests/''']

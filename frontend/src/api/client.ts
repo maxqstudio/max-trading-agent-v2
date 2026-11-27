@@ -1,11 +1,43 @@
 import { useEffect, useRef, useState } from 'react';
 import type { LiveStateSnapshot } from '../types/trading';
 
-async function req<T>(url: string, init?: RequestInit): Promise<T> {
+const TOKEN_KEY = 'mta2_control_token';
+
+// CONTROL_API_TOKEN from your .env. Kept only in this browser's localStorage.
+export function getControlToken(): string {
+  try {
+    return localStorage.getItem(TOKEN_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+
+function askForControlToken(): string {
+  const t = (window.prompt('Masukkan CONTROL_API_TOKEN dari file .env (sekali saja, disimpan di browser ini):') || '').trim();
+  try {
+    if (t) localStorage.setItem(TOKEN_KEY, t);
+  } catch {
+    // storage unavailable: token is used for this request only
+  }
+  return t;
+}
+
+async function req<T>(url: string, init?: RequestInit, retried = false): Promise<T> {
+  let token = getControlToken();
+  if (!token) token = askForControlToken();
   const res = await fetch(url, {
-    headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) },
     ...init,
+    headers: { 'Content-Type': 'application/json', 'X-Control-Token': token, ...(init?.headers || {}) },
   });
+  if (res.status === 401 && !retried) {
+    try {
+      localStorage.removeItem(TOKEN_KEY);
+    } catch {
+      // ignore
+    }
+    askForControlToken();
+    return req<T>(url, init, true);
+  }
   if (!res.ok) {
     const txt = await res.text();
     throw new Error(txt || `HTTP ${res.status}`);
@@ -27,8 +59,10 @@ export const api = {
   getConfig: () => req<any>('/api/config'),
   updateRisk: (body: Record<string, unknown>) =>
     req<any>('/api/config/risk', { method: 'PUT', body: JSON.stringify(body) }),
-  setMode: (trading_mode: string) =>
-    req<any>('/api/control/mode', { method: 'POST', body: JSON.stringify({ trading_mode }) }),
+  setMode: (trading_mode: string, confirm_code = '') =>
+    req<any>('/api/control/mode', { method: 'POST', body: JSON.stringify({ trading_mode, confirm_code }) }),
+  releaseKill: (confirm_code: string) =>
+    req<any>('/api/control/kill/release', { method: 'POST', body: JSON.stringify({ confirm_code }) }),
   togglePause: () => req<any>('/api/control/pause', { method: 'POST' }),
   toggleShield: () => req<any>('/api/control/shield-toggle', { method: 'POST' }),
   killSwitch: (mode: 'SOFT_PAUSE' | 'FLATTEN_KILL', confirm_code = '') =>
@@ -62,7 +96,7 @@ export function useLiveTelemetry() {
     const connect = () => {
       if (!alive) return;
       const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-      const url = `${proto}://${window.location.host}/ws/live`;
+      const url = `${proto}://${window.location.host}/ws/live?token=${encodeURIComponent(getControlToken())}`;
       ws = new WebSocket(url);
 
       ws.onopen = () => {
