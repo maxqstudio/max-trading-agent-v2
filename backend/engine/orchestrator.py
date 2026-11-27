@@ -39,7 +39,7 @@ from backend.engine.exit_selector import ExitStyleSelector
 from backend.engine.filters import HTF_BUCKETS, ICHI_BUCKETS, SESSIONS, FilterLearner, decide
 from backend.engine.hitrun_stop import Ghost, HitRunArm, HitRunPlan, HitRunTuner, plan_stop, time_stop_due
 from backend.engine.supervisor import SupervisorSettings, TradeSupervisor, build_context, price_drifted, scale_volume
-from backend.evolution.meta_labeler import CalibratedMetaLabeler
+from backend.evolution.meta_labeler import CalibratedMetaLabeler, effective_ml_cutoff
 from backend.evolution.optimizer import PurgedWalkForwardOptimizer
 from backend.evolution.rl_exit_agent import RLExitAgent
 from backend.evolution.sequence_net import SequenceConvNet
@@ -85,11 +85,24 @@ class ShadowPosition:
 PAPER_VERSION = "PAPER"  # Normal book (kept for journal compatibility)
 HITRUN_VERSION = "PAPER-HITRUN"
 RAW_VERSION = "PAPER-RAW"
-PAPER_BOOKS: dict[str, str] = {"normal": PAPER_VERSION, "hitrun": HITRUN_VERSION, "raw": RAW_VERSION}
-PAPER_LABELS: dict[str, str] = {"normal": "Normal", "hitrun": "Hit & Run", "raw": "No Veto"}
-# Normal and Hit & Run open only what the supervisor allowed. "raw" opens every setup that
-# passed the risk checks, so the bandit and RL exit learn from all setups, not only approved ones.
+RAW_HITRUN_VERSION = "PAPER-RAW-HITRUN"
+PAPER_BOOKS: dict[str, str] = {
+    "normal": PAPER_VERSION,
+    "hitrun": HITRUN_VERSION,
+    "raw": RAW_VERSION,
+    "raw_hitrun": RAW_HITRUN_VERSION,
+}
+PAPER_LABELS: dict[str, str] = {
+    "normal": "Normal",
+    "hitrun": "Hit & Run",
+    "raw": "No Veto (Normal)",
+    "raw_hitrun": "No Veto (Hit & Run)",
+}
+# Normal and Hit & Run open only what the supervisor + filters allowed.
+# Raw books ("raw" and "raw_hitrun") open every risk-approved setup (2x2 matrix).
 VETOED_BOOKS = ("normal", "hitrun")
+RAW_BOOKS = ("raw", "raw_hitrun")
+HITRUN_BOOK_NAMES = frozenset({"hitrun", "raw_hitrun"})
 VETO_KEYS = ("APPROVE", "REDUCE", "REJECT", "NONE")
 PAPER_START_EQUITY = 10000.0
 BAR_BUFFER = 3000  # M1 bars kept per symbol: about 50 hours (H1 direction, M15 Ichimoku, yesterday's range)
@@ -243,7 +256,13 @@ class TradingOrchestrator:
         snaps = await self.db.list_snapshots()
         if snaps:
             self.gate.snapshots = snaps
-            self.apply_active_config(self.gate.active_config)
+            active_snap = self.gate.active_snapshot
+            # Only restore evolved champion parameters if this snapshot actually came from an evolution promotion;
+            # never let a legacy baseline snapshot clobber user Setup/local.yaml settings.
+            if active_snap.config_snapshot and active_snap.note != "Initial Champion baseline":
+                self.apply_champion_config(TradingConfig.model_validate(active_snap.config_snapshot))
+            else:
+                self.gate.active_config = self.config
         else:
             await self.db.save_snapshot(self.gate.active_snapshot)
 
@@ -301,6 +320,26 @@ class TradingOrchestrator:
         self.suite = StrategySuite.from_config(cfg)
         self.rl_exit.be_trigger_r = cfg.ai.rl_exit_be_trigger_r
         self.rl_exit.trail_trigger_r = cfg.ai.rl_exit_trail_trigger_r
+
+    def apply_champion_config(self, champion_cfg: TradingConfig) -> TradingConfig:
+        """Apply evolved strategy/AI/risk params while preserving user Setup settings (local.yaml)."""
+        ops = self.config
+        merged = champion_cfg.model_copy(
+            update={
+                "app": ops.app.model_copy(update={"version": champion_cfg.app.version}),
+                "supervisor": ops.supervisor,
+                "exits": ops.exits,
+                "paper": ops.paper,
+                "filters": ops.filters,
+                "shields": ops.shields,
+                "risk": champion_cfg.risk.model_copy(
+                    update={"max_cost_to_risk_ratio": ops.risk.max_cost_to_risk_ratio}
+                ),
+            }
+        )
+        self.apply_active_config(merged)
+        self.gate.active_config = merged
+        return merged
 
     async def _log_decision(self, event: DecisionEvent) -> None:
         self.recent_decisions.appendleft(event)
@@ -460,7 +499,7 @@ class TradingOrchestrator:
 
             rolled = self.gate.check_live_rollback_guard(self.account.equity, trade_closed=True)
             if rolled is not None:
-                self.apply_active_config(self.gate.active_config)
+                self.apply_champion_config(self.gate.active_config)
                 for sn in self.gate.snapshots:
                     await self.db.save_snapshot(sn)
                 await self._log_decision(
@@ -636,10 +675,13 @@ class TradingOrchestrator:
         dl_align = dl_pred.prob_up if best_sig.side == Side.BUY else dl_pred.prob_down
         lat_ms = round((time.perf_counter() - t0) * 1000.0, 2)
 
+        sig_sl_dist = max(abs(best_sig.entry_price - best_sig.sl_price), spec.point)
+        sig_rr = abs(best_sig.tp_price - best_sig.entry_price) / sig_sl_dist
+        ml_cutoff = effective_ml_cutoff(self.config.ai.ml_min_probability, sig_rr)
         self.readiness[sym] = min(98, int(ml_prob * 100))
 
-        if ml_prob < self.config.ai.ml_min_probability:
-            self.active_thought = f"{sym} {best_sig.strategy_id} {best_sig.side.value} filtered by ML Meta-Labeler (P={ml_prob:.2f} < {self.config.ai.ml_min_probability:.2f})"
+        if ml_prob < ml_cutoff:
+            self.active_thought = f"{sym} {best_sig.strategy_id} {best_sig.side.value} filtered by ML Meta-Labeler (P={ml_prob:.2f} < {ml_cutoff:.2f}, RR {sig_rr:.1f})"
             await self._log_decision(
                 DecisionEvent(
                     symbol=sym,
@@ -647,7 +689,7 @@ class TradingOrchestrator:
                     tag="ML FILTER",
                     strategy_id=best_sig.strategy_id,
                     side=best_sig.side.value,
-                    message=f"Rejected: Calibrated P(win) {ml_prob:.2f} < {self.config.ai.ml_min_probability:.2f} | DL align {dl_align:.2f}",
+                    message=f"Rejected: Calibrated P(win) {ml_prob:.2f} < {ml_cutoff:.2f} (RR {sig_rr:.1f}) | DL align {dl_align:.2f}",
                     latency_ms=lat_ms,
                 )
             )
@@ -685,14 +727,22 @@ class TradingOrchestrator:
         )
         per_trade_llm = reviewed and self.supervisor.uses_per_trade_review(best_sig.strategy_id)
         if self.config.paper.enabled and not (per_trade_llm and sym in self._supervising):
-            # Every risk-approved setup, before (and regardless of) the supervisor's verdict.
+            # Every risk-approved setup, before (and regardless of) the supervisor & entry filters (both Normal & Hit & Run).
             await self._open_paper_position(
                 sym, best_sig, risk_dec, assess, spec, ml_prob, dl_align, spread_pts,
-                books=("raw",), veto="PENDING" if reviewed else "NONE", context=entry_ctx,
+                books=RAW_BOOKS, veto="PENDING" if reviewed else "NONE", context=entry_ctx,
             )
-        # Direction, regime and session filters: after the No Veto book, so it keeps seeing every setup.
+        # Direction, regime and session filters: after the No Veto books, so they keep seeing every setup.
         block = self._entry_filter(entry_ctx, strategy_id=best_sig.strategy_id, regime=assess.regime.value)
         if block.code:
+            raw = self.paper_books["raw"].positions.get(sym)
+            if raw is not None and raw.veto == "PENDING":
+                if reviewed and not per_trade_llm:
+                    bv = self.supervisor.evaluate_from_brief(sym, best_sig.side, best_sig.strategy_id)
+                    raw.veto = bv.decision if not bv.error else "NONE"
+                else:
+                    raw.veto = "NONE"
+                await self._save_paper()
             self.active_thought = f"{sym} {best_sig.strategy_id} {best_sig.side.value} filtered: {block.detail}"
             await self._log_decision(
                 DecisionEvent(
@@ -952,7 +1002,7 @@ class TradingOrchestrator:
             if sym in book.positions:
                 continue
             p_sl, p_vol, p_risk, p_ts = sl, risk_dec.volume, max(abs(entry - sl), spec.point), 0
-            if name == "hitrun" and h.own_stop:
+            if name in HITRUN_BOOK_NAMES and h.own_stop:
                 plan = self._hitrun_plan(sym, sig.side, entry, sig.atr, spread_px, spec, sl, risk_dec.volume,
                                          self._hitrun_arm(sym, assess.regime))
                 if plan is None:
@@ -979,7 +1029,7 @@ class TradingOrchestrator:
                 htf_h1=int(ctx.get("htf_h1", 0)),
                 session=str(ctx.get("session", "")),
                 ichi_m15=int(ctx.get("ichi_m15", 0)),
-                tp_stages=self._stages_inside(sig, entry, tp) if name != "hitrun" else [],
+                tp_stages=self._stages_inside(sig, entry, tp) if name not in HITRUN_BOOK_NAMES else [],
             )
             opened = True
         if "raw" in books and h.own_stop and h.adaptive:
@@ -1150,10 +1200,26 @@ class TradingOrchestrator:
 
     async def _update_paper_positions_on_tick(self, tk: TickSnapshot, now_sec: int) -> None:
         changed = False
-        if self.hitrun_tuner.ghosts.get(tk.symbol) and self.hitrun_tuner.on_tick(
-            tk.symbol, tk.bid, tk.ask, now_sec, self.config.paper.hit_run.min_net_profit, self._ghost_net
-        ):
-            await self.db.set_kv("hitrun_tuner", self.hitrun_tuner.to_dict(), utc_now_ms())
+        if self.hitrun_tuner.ghosts.get(tk.symbol):
+            spec_g = self.specs.get(tk.symbol)
+            sp_px_g = (tk.ask - tk.bid) if tk.ask > tk.bid else (tk.spread_points * (spec_g.point if spec_g else 0.0))
+            comm_per_lot_g = self.paper_costs(tk.symbol)["commission_per_lot"]
+
+            def _ghost_friction(g: Ghost) -> float:
+                sp_m = (sp_px_g / spec_g.tick_size * spec_g.tick_value * g.volume) if (spec_g and spec_g.tick_size > 0) else 0.0
+                return comm_per_lot_g * g.volume + sp_m
+
+            if self.hitrun_tuner.on_tick(
+                tk.symbol,
+                tk.bid,
+                tk.ask,
+                now_sec,
+                self.config.paper.hit_run.min_net_profit,
+                self._ghost_net,
+                min_cost_multiple=self.config.paper.hit_run.min_cost_multiple,
+                friction_at=_ghost_friction,
+            ):
+                await self.db.set_kv("hitrun_tuner", self.hitrun_tuner.to_dict(), utc_now_ms())
 
         for name, book in self.paper_books.items():
             p = book.positions.get(tk.symbol)
@@ -1168,8 +1234,8 @@ class TradingOrchestrator:
             comm_px = self._commission_price(p.symbol, spec)
             spread_money = (spread_px / spec.tick_size * spec.tick_value * p.volume) if (spec and spec.tick_size > 0) else 0.0
             close_reason = ""
-            if name == "hitrun":
-                # Hit & Run: take net profit above both min_net_profit and cost-multiple floor.
+            if name in HITRUN_BOOK_NAMES:
+                # Hit & Run (both filtered and No Veto): take net profit above min_net_profit and cost-multiple floor.
                 take, net = net_take(
                     self._net_take(p.symbol),
                     gross_money=self._paper_money(p, self._paper_exit_px(p, px)),
@@ -1184,7 +1250,7 @@ class TradingOrchestrator:
                     self._exit_policy(), side=p.side, entry=p.entry_price, risk=p.risk_dist,
                     price=px, peak_r=p.mfe_r, sl=p.sl, spread_px=spread_px, commission_px=comm_px,
                 )
-            if name != "hitrun" and p.tp_stages:
+            if name not in HITRUN_BOOK_NAMES and p.tp_stages:
                 peak_px = p.entry_price + p.mfe_r * p.risk_dist if p.side == Side.BUY else p.entry_price - p.mfe_r * p.risk_dist
                 staged = stage_stop(side=p.side, entry=p.entry_price, stages=p.tp_stages, peak_price=peak_px,
                                     sl=new_sl if action == "MOVE_SL" else p.sl, cost_px=spread_px + comm_px)
@@ -1200,13 +1266,15 @@ class TradingOrchestrator:
                 continue
             book.positions.pop(tk.symbol, None)
             changed = True
-            # Both books pay the same round-trip commission so the comparison is fair.
+            # All paper books pay the same round-trip commission so every comparison is fair (including Net R).
             exit_px = self._paper_exit_px(p, px)
             pnl = round(self._paper_money(p, exit_px) - self._net_take(p.symbol).commission_per_lot * p.volume, 2)
+            exit_r = ((exit_px - p.entry_price) if p.side == Side.BUY else (p.entry_price - exit_px)) / max(p.risk_dist, 1e-12)
+            net_r = round(exit_r - (comm_px / max(p.risk_dist, 1e-12)), 4)
             book.equity = round(book.equity + pnl, 2)
-            self.exit_selector.record(name, p.symbol, p.regime.value, round(cur_r, 4))
+            self.exit_selector.record(name, p.symbol, p.regime.value, net_r)
             if name == "raw":
-                await self._learn_from_unvetoed(p, round(cur_r, 4), pnl, now_sec)
+                await self._learn_from_unvetoed(p, net_r, pnl, now_sec)
             in_profit_stop = hit_sl and cur_r > 0
             reason = close_reason or (
                 "TP" if hit_tp else "TAKE" if action == "CLOSE" else "LOCK" if in_profit_stop
@@ -1230,7 +1298,7 @@ class TradingOrchestrator:
                     pnl_money=pnl,
                     commission=-round(self._net_take(p.symbol).commission_per_lot * p.volume, 2),
                     slippage_points=self.paper_costs(p.symbol)["slippage_points"],
-                    pnl_r=round(cur_r, 4),
+                    pnl_r=net_r,
                     mae_r=round(p.mae_r, 4),
                     mfe_r=round(p.mfe_r, 4),
                     spread_at_entry=p.spread_pts,
@@ -1246,8 +1314,8 @@ class TradingOrchestrator:
                     tag=f"{PAPER_LABELS[name].upper()} {reason}",
                     strategy_id=p.strategy_id,
                     side=p.side.value,
-                    message=f"Paper {PAPER_LABELS[name]} {p.side.value} {p.volume} lot closed @ {px} ({cur_r:+.2f}R, ${pnl:+.2f}). Equity ${book.equity:,.2f}",
-                    metadata={"pnl": pnl, "pnl_r": round(cur_r, 3)},
+                    message=f"Paper {PAPER_LABELS[name]} {p.side.value} {p.volume} lot closed @ {px} ({net_r:+.2f}R, ${pnl:+.2f}). Equity ${book.equity:,.2f}",
+                    metadata={"pnl": pnl, "pnl_r": round(net_r, 3)},
                 )
             )
         if changed:
@@ -1782,7 +1850,7 @@ class TradingOrchestrator:
             if transition == "PENDING_APPROVAL":
                 await self._notify(f"Challenger passed Live Shadow Arena! Ready for /approve on Dashboard or Telegram.")
             elif transition == "AUTO_PROMOTED":
-                self.apply_active_config(self.gate.active_config)
+                self.apply_champion_config(self.gate.active_config)
                 for sn in self.gate.snapshots:
                     await self.db.save_snapshot(sn)
                 await self._notify(f"Challenger AUTO-PROMOTED to Champion {self.gate.active_snapshot.version_id}!")

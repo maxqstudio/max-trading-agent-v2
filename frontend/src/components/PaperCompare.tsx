@@ -49,7 +49,7 @@ interface Compare {
   };
 }
 
-const COLOR: Record<string, string> = { normal: '#F59E0B', hitrun: '#EC4899', raw: '#14B8A6', mt5: '#3B82F6' };
+const COLOR: Record<string, string> = { normal: '#F59E0B', hitrun: '#EC4899', raw: '#14B8A6', raw_hitrun: '#A855F7', mt5: '#3B82F6' };
 const VERDICT: Record<string, string> = {
   APPROVE: 'Approved by AI Supervisor',
   REDUCE: 'Reduced by AI Supervisor',

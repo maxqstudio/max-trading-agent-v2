@@ -159,9 +159,9 @@ def test_deterministic_reflector_and_champion_gate_promote_and_auto_rollback() -
     assert transition == "PENDING_APPROVAL"
 
     promoted = gate.promote_active_challenger(note="Test promo", current_equity=10200.0)
-    assert promoted is not None and gate.active_snapshot.version_id == "v1.1"
+    assert promoted is not None and gate.active_snapshot.version_id == "v2.3"
 
     # Trigger Stage-4 Auto-Rollback on >1.5% post-promotion drawdown (10200 -> 10020 = 1.76% DD)
     rolled = gate.check_live_rollback_guard(current_equity=10020.0, trade_closed=True)
     assert rolled is not None
-    assert gate.active_snapshot.version_id == "v1.0"
+    assert gate.active_snapshot.version_id == "v2.2"

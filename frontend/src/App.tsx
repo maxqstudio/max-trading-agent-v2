@@ -58,8 +58,13 @@ export default function App() {
   const ddPct = state?.account?.daily_dd_pct ?? 0;
   const staleBridge = state ? !state.bridge_connected : !wsConnected;
   const paperPositions = state?.paper?.positions || [];
-  const floatingTotal =
-    (state?.positions || []).reduce((acc, p) => acc + p.profit, 0) + paperPositions.reduce((acc, p) => acc + p.profit, 0);
+  const normalPaperPositions = state?.paper?.books?.normal?.positions || paperPositions.filter((p) => !p.book || p.book === 'normal');
+  const hasMt5Positions = (state?.positions?.length || 0) > 0;
+  const floatingTotal = hasMt5Positions
+    ? (state?.positions || []).reduce((acc, p) => acc + p.profit, 0)
+    : normalPaperPositions.reduce((acc, p) => acc + p.profit, 0);
+  const rawEaVer = state?.hard_guard?.ea_version;
+  const displayVersion = rawEaVer ? `v${rawEaVer.replace(/^v/i, '').replace(/\.0$/, '')}` : 'v2.2';
 
   const filteredDecisions = (state?.decisions || []).filter(
     (d) => logFilter === 'ALL' || d.category === logFilter
@@ -96,8 +101,8 @@ export default function App() {
             <div>
               <div className="flex items-center gap-1.5 leading-none">
                 <span className="font-bold tracking-wider text-xs">MAX QUANT</span>
-                <span className="mono text-xs px-1.5 py-0.5 rounded bg-[#10B981]/15 text-[#10B981] border border-[#10B981]/40 font-bold">
-                  {state?.champion_version || 'v1.0'}
+                <span className="mono text-xs px-1.5 py-0.5 rounded bg-[#10B981]/15 text-[#10B981] border border-[#10B981]/40 font-bold" title={rawEaVer ? `MT5 EA ${rawEaVer}` : 'EA v2.2'}>
+                  {displayVersion}
                 </span>
               </div>
               <div className="text-xs text-[#8A9BB5] mt-0.5">MT5 trading robot</div>

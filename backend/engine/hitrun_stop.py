@@ -181,8 +181,18 @@ class HitRunTuner:
             for p in plans
         ]
 
-    def on_tick(self, symbol: str, bid: float, ask: float, now_sec: int, min_net_profit: float,
-                net_at: Callable[[Ghost, float], float]) -> int:
+    def on_tick(
+        self,
+        symbol: str,
+        bid: float,
+        ask: float,
+        now_sec: int,
+        min_net_profit: float,
+        net_at: Callable[[Ghost, float], float],
+        *,
+        min_cost_multiple: float = 0.0,
+        friction_at: Callable[[Ghost], float] | None = None,
+    ) -> int:
         """Advance this symbol's ghosts. ``net_at(ghost, price)`` is the net money if closed at
         ``price`` (bid for buys, ask for sells). Returns how many ghosts closed."""
         live = self.ghosts.get(symbol)
@@ -193,9 +203,11 @@ class HitRunTuner:
         for g in live:
             px = bid if g.side == Side.BUY else ask
             net = net_at(g, px)
+            friction = friction_at(g) if friction_at is not None else 0.0
+            take_floor = max(min_net_profit, min_cost_multiple * max(friction, 0.0), 0.01)
             stopped = (px <= g.sl) if g.side == Side.BUY else (px >= g.sl)
             if (
-                net >= max(min_net_profit, 0.01)
+                net >= take_floor
                 or stopped
                 or time_stop_due(g.open_sec, now_sec, g.arm.time_stop_bars, net)
                 or now_sec - g.open_sec >= GHOST_MAX_HOLD_SEC
