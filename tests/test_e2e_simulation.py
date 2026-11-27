@@ -9,6 +9,7 @@ from backend.bridge.simulator import SimulatedMT5Bridge
 from backend.core.config import EnvSettings, load_trading_config
 from backend.core.models import TradingMode
 from backend.engine.orchestrator import TradingOrchestrator
+from backend.llm.router import LLMRouter
 from backend.storage.database import Database
 
 
@@ -29,7 +30,7 @@ def test_e2e_authenticated_bridge_simulation_evolution_and_kill_switch(tmp_path:
         _env_file=None,
     )
     db = Database(cfg.app.database_path)
-    orch = TradingOrchestrator(cfg, env, db)
+    orch = TradingOrchestrator(cfg, env, db, llm_router=LLMRouter(resolved=[]))
     app = create_app(orch)
 
     sim = SimulatedMT5Bridge(symbols=cfg.instruments.symbols, seed=99)

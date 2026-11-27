@@ -14,6 +14,7 @@ from backend.core.config import AppConfig, EnvSettings, TradingConfig, load_trad
 from backend.core.models import OrderAction, OrderCommand, Side, TradingMode
 from backend.core.safety import KillSwitchStore, entry_block_reason, is_strong_token
 from backend.engine.orchestrator import TradingOrchestrator
+from backend.llm.router import LLMRouter
 from backend.storage.database import Database
 
 BRIDGE = "test_bridge_secret_token_abc"
@@ -46,7 +47,7 @@ def _orch(tmp_path: Path, mode: TradingMode | None = None, **env_kw) -> TradingO
     db = Database(cfg.app.database_path)
     asyncio.run(db.connect())
     _OPEN_DBS.append(db)
-    return TradingOrchestrator(cfg, _env(**env_kw), db)
+    return TradingOrchestrator(cfg, _env(**env_kw), db, llm_router=LLMRouter(resolved=[]))
 
 
 # ---------- pure rules ----------

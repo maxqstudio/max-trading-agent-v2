@@ -9,6 +9,7 @@ from backend.evolution.backtester import CausalBacktester
 from backend.evolution.bandit import ContextualBanditRL
 from backend.evolution.champion_gate import ChampionChallengerGate
 from backend.evolution.llm_reflector import LLMReflectionAnalyst
+from backend.llm.router import LLMRouter
 from backend.evolution.meta_labeler import CalibratedMetaLabeler
 from backend.evolution.monte_carlo import run_monte_carlo_stress
 from backend.evolution.rl_exit_agent import RLExitAgent
@@ -112,9 +113,15 @@ def test_deterministic_reflector_and_champion_gate_promote_and_auto_rollback() -
         for _ in range(4)
     ]
 
-    reflector = LLMReflectionAnalyst(EnvSettings(llm_provider="deterministic", _env_file=None))
+    reflector = LLMReflectionAnalyst(EnvSettings(_env_file=None), router=LLMRouter(resolved=[]))
     report = reflector.deterministic_reflect(trades, cfg)
     assert len(report.patches) >= 1
+
+    # A healthy journal must NOT force a parameter change (tuning on noise = overfitting)
+    healthy = [t for t in trades if t.pnl_r > 0] * 3
+    calm = reflector.deterministic_reflect(healthy, cfg)
+    assert calm.patches == []
+    assert "no parameter change" in calm.finding
 
     # 2. Champion Gate: reject weak candidate, accept strong candidate -> Shadow Arena -> Promote -> Auto-Rollback
     gate = ChampionChallengerGate(cfg, initial_equity=10000.0)

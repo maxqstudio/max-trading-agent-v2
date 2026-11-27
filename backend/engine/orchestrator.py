@@ -32,6 +32,7 @@ from backend.core.models import (
 from backend.evolution.bandit import ContextualBanditRL
 from backend.evolution.champion_gate import ChampionChallengerGate
 from backend.evolution.llm_reflector import LLMReflectionAnalyst
+from backend.llm.router import LLMRouter
 from backend.evolution.meta_labeler import CalibratedMetaLabeler
 from backend.evolution.optimizer import PurgedWalkForwardOptimizer
 from backend.evolution.rl_exit_agent import RLExitAgent
@@ -71,8 +72,10 @@ class TradingOrchestrator:
         config: TradingConfig,
         env: EnvSettings,
         db: Database,
+        llm_router: LLMRouter | None = None,
     ) -> None:
         self.config = config
+        self.llm = llm_router if llm_router is not None else LLMRouter.from_env(".env")
         self.env = env
         self.db = db
 
@@ -122,7 +125,7 @@ class TradingOrchestrator:
             trail_trigger_r=config.ai.rl_exit_trail_trigger_r,
         )
         self.optimizer = PurgedWalkForwardOptimizer()
-        self.reflector = LLMReflectionAnalyst(env)
+        self.reflector = LLMReflectionAnalyst(env, router=self.llm)
         self.gate = ChampionChallengerGate(config, initial_equity=self.account.equity)
 
         # Parallel Live Shadow Arena
@@ -173,6 +176,7 @@ class TradingOrchestrator:
 
         dl_path = f"{self.config.app.snapshots_dir}/dl_champion.npz"
         self.dl_net.load(dl_path)
+        self.ml_labeler.load(f"{self.config.app.snapshots_dir}/ml_champion.pkl")
 
     def apply_active_config(self, cfg: TradingConfig) -> None:
         self.config = cfg
@@ -733,6 +737,7 @@ class TradingOrchestrator:
                 self.dl_net.save(f"{self.config.app.snapshots_dir}/dl_champion.npz")
             if wfo.trained_ml.trained:
                 self.ml_labeler = wfo.trained_ml
+                self.ml_labeler.save(f"{self.config.app.snapshots_dir}/ml_champion.pkl")
 
             cand = self.gate.submit_candidate(
                 candidate_config=wfo.best_config,

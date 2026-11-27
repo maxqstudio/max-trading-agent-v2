@@ -101,3 +101,39 @@ def apply_safe_patches(
         cfg_dict = set_nested_value(cfg_dict, safe.path, val)
         applied.append(safe)
     return TradingConfig.model_validate(cfg_dict), applied
+
+
+# +1: raising the value takes MORE risk / loosens a filter.  -1: lowering it does.
+# LLM-proposed patches may only move these in the risk-REDUCING direction.
+RISK_DIRECTION: dict[str, int] = {
+    "risk.risk_per_trade_pct": +1,
+    "risk.min_risk_pct": +1,
+    "risk.max_risk_pct": +1,
+    "risk.max_daily_drawdown_pct": +1,
+    "risk.max_concurrent_positions": +1,
+    "risk.max_usd_correlated_positions": +1,
+    "risk.max_spread_atr_ratio": +1,
+    "risk.consecutive_loss_limit": +1,
+    "risk.consecutive_loss_cooldown_min": -1,
+    "risk.min_rr_ratio": -1,
+    "ai.ml_min_probability": -1,
+}
+MAX_LLM_STEP_FRACTION = 0.20  # one reflection can move a parameter at most 20% of its current value
+
+
+def restrict_llm_patch(cfg_dict: dict[str, Any], patch: ParameterPatch) -> ParameterPatch | None:
+    """Stricter gate for LLM ideas: whitelist + hard clamp + no risk increase + capped step size."""
+    try:
+        current = float(get_nested_value(cfg_dict, patch.path))
+    except (KeyError, TypeError, ValueError):
+        return None
+    target = float(patch.new_value)
+    direction = RISK_DIRECTION.get(patch.path, 0)
+    if direction and (target - current) * direction > 0:
+        return None
+    max_step = abs(current) * MAX_LLM_STEP_FRACTION
+    if max_step > 0:
+        target = max(current - max_step, min(current + max_step, target))
+    return clamp_and_validate_patch(
+        cfg_dict, ParameterPatch(path=patch.path, old_value=current, new_value=target, rationale=patch.rationale)
+    )

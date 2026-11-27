@@ -26,6 +26,23 @@ cd max-trading-agent-v2
    - Double-click **`start_mt5_live.bat`** → opens **`http://127.0.0.1:8765`**
    - In MT5 Navigator, drag **`MaxTradingBridge`** onto 1 chart (`XAUUSD` M1). Token is already pre-configured! If your broker uses a suffix (e.g., `XAUUSDm`), set `SymbolSuffix = m`.
 
+## AI Providers (Claude first)
+
+Double-click **`llm_setup.bat`** (or `python scripts/llm_setup.py`): pick providers in order, paste keys, accept or change the models, and it tests each connection. Everything is written to your local `.env` only.
+
+| Provider | Key in `.env` | Notes |
+|---|---|---|
+| Claude (default, 1st) | `ANTHROPIC_API_KEY` | Official SDK, structured outputs, tool use, prompt caching, refusal fallback. `ANTHROPIC_MODEL=claude-opus-5-5` (reflection), `ANTHROPIC_FAST_MODEL=claude-haiku-5-5` (scalping supervisor) |
+| Gemini (2nd) | `GEMINI_API_KEY` | Set `GEMINI_MODEL` to the exact id you use |
+| OpenAI (3rd) | `OPENAI_API_KEY` | |
+| OpenRouter, Groq, DeepSeek, Mistral, xAI, Together | `<NAME>_API_KEY` | OpenAI-compatible presets |
+| Ollama, llama.cpp | none | Local and free; `OLLAMA_BASE_URL` / `LLAMACPP_BASE_URL` |
+| Custom | `CUSTOM_BASE_URL`, `CUSTOM_MODEL`, `CUSTOM_API_KEY` | Any OpenAI-compatible server |
+
+`LLM_PROVIDER_CHAIN=anthropic,gemini,openai` sets the order; the next provider is tried when one fails or times out, and the deterministic quant reflector is the last resort. `GET /api/llm/status` shows the chain, masked keys, latency and spend; `POST /api/llm/test` pings each provider.
+
+LLM suggestions can never raise risk: patches are whitelisted, clamped, capped at a 20% step, risk-increasing directions are discarded, and every change still has to pass walk-forward + Monte Carlo + shadow trading before a human approves it.
+
 ## Safety Rails (read before trading real money)
 
 - **Paper trading by default.** `trading_mode: SHADOW_ONLY` logs and shadow-tracks every validated setup but sends nothing to MT5.

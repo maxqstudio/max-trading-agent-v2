@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pickle
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -146,3 +148,28 @@ class CalibratedMetaLabeler:
             "calibration_points": self.calibration_points,
             "feature_importances": self.feature_importances,
         }
+
+
+    # --- Persistence (local snapshots dir only; *.pkl is git-ignored) ---
+    def save(self, path: str | Path) -> None:
+        if not self.trained:
+            return
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        with tmp.open("wb") as fh:
+            pickle.dump(self.__dict__, fh)
+        tmp.replace(p)
+
+    def load(self, path: str | Path) -> bool:
+        """Load a model this app saved itself. Never point this at a file from the internet."""
+        p = Path(path)
+        if not p.exists():
+            return False
+        try:
+            with p.open("rb") as fh:
+                state = pickle.load(fh)  # noqa: S301 - trusted local snapshot written by save()
+            self.__dict__.update(state)
+            return True
+        except Exception:
+            return False
