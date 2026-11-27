@@ -39,7 +39,7 @@ def test_paper_position_survives_restart_and_closes_into_journal(tmp_path: Path)
             risk = SimpleNamespace(volume=0.10, adjusted_sl=2645.0, adjusted_tp=2655.0)
             assess = SimpleNamespace(regime=MarketRegime.TRENDING_BULL)
             await orch._open_paper_position("XAUUSD", sig, risk, assess, orch.specs["XAUUSD"], 0.6, 0.55, 20.0)
-            assert "XAUUSD" in orch.paper_positions
+            assert all("XAUUSD" in b.positions for b in orch.paper_books.values())
             orch.shadow_equity = 10123.45
             await orch._save_arena()
         finally:
@@ -50,13 +50,13 @@ def test_paper_position_survives_restart_and_closes_into_journal(tmp_path: Path)
         await db.connect()
         try:
             await orch.initialize_from_storage()
-            assert "XAUUSD" in orch.paper_positions  # restored
+            assert all("XAUUSD" in b.positions for b in orch.paper_books.values())  # restored
             assert orch.shadow_equity == 10123.45
             await orch._update_paper_positions_on_tick(tick("XAUUSD", 2655.50, 2655.70), int(utc_now_ms() // 1000))
-            assert "XAUUSD" not in orch.paper_positions
+            assert all("XAUUSD" not in b.positions for b in orch.paper_books.values())
             trades = await db.list_trades(version_id=PAPER_VERSION)
-            mt5_only = await db.list_trades(is_shadow=False, exclude_version_id=PAPER_VERSION)
-            return orch.paper_equity, [trades, mt5_only]
+            mt5_only = await db.list_trades(is_shadow=False, exclude_version_prefix="PAPER")
+            return orch.paper_books["normal"].equity, [trades, mt5_only]
         finally:
             await db.close()
 
@@ -71,7 +71,7 @@ def test_paper_position_survives_restart_and_closes_into_journal(tmp_path: Path)
         await db.connect()
         try:
             await orch.initialize_from_storage()
-            return orch.paper_equity
+            return orch.paper_books["normal"].equity
         finally:
             await db.close()
 

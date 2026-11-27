@@ -56,6 +56,7 @@ class TrackedPositionMeta:
     bars_held: int = 0
     already_at_be: bool = False
     already_partial: bool = False
+    last_sl_request: float = 0.0  # last SL we asked MT5 for (avoids re-sending every sync)
     last_rl_action: RLExitAction = RLExitAction.HOLD
     rl_trace: list[str] = field(default_factory=lambda: ["HOLD"])
 

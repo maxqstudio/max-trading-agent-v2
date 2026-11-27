@@ -163,3 +163,15 @@ async def test_router_tries_fallback_model_before_next_provider():
     res, _ = await router.complete(LLMRequest(task="t", system="s", user="u", schema={}))
     assert res.model == "backup-model"
     assert calls == ["anthropic:main-model", "anthropic:backup-model"]
+
+
+def test_paper_compare_and_exit_settings(client):
+    c, _, orch = client
+    c.portal.call(orch.db.connect)  # the fixture does not start the engine
+    r = c.get("/api/paper/compare").json()
+    assert [row["book"] for row in r["rows"]] == ["normal", "hitrun", "mt5"]
+    assert r["learning"]["adaptive"] is True and r["learning"]["min_samples"] == 20
+    r = c.put("/api/setup/exits", json={"adaptive": False, "hit_take_r": 0.6, "be_at_r": 0.4}).json()
+    assert r["exits"]["adaptive"] is False and r["exits"]["be_at_r"] == 0.4 and r["hit_run"]["take_r"] == 0.6
+    assert c.get("/api/paper/compare").json()["learning"]["adaptive"] is False
+    assert c.put("/api/setup/exits", json={"be_at_r": 9}).status_code == 422

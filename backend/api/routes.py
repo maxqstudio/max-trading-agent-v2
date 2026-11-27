@@ -186,16 +186,17 @@ def create_app(orchestrator: TradingOrchestrator) -> FastAPI:
     ) -> dict[str, Any]:
         # LIVE = real MT5 fills (demo or live account), PAPER = virtual SHADOW_ONLY fills,
         # SHADOW = challenger arena.
-        from backend.engine.orchestrator import PAPER_VERSION
+        # PAPER = Normal paper book, HITRUN = Hit & Run paper book.
+        from backend.engine.orchestrator import HITRUN_VERSION, PAPER_VERSION
 
-        is_shadow = True if mode == "SHADOW" else (False if mode in ("LIVE", "PAPER") else None)
+        is_shadow = True if mode == "SHADOW" else (False if mode in ("LIVE", "PAPER", "HITRUN") else None)
         sym = None if (not symbol or symbol == "ALL") else symbol
         trades = await orchestrator.db.list_trades(
             limit=limit,
             is_shadow=is_shadow,
             symbol=sym,
-            version_id=PAPER_VERSION if mode == "PAPER" else None,
-            exclude_version_id=PAPER_VERSION if mode == "LIVE" else None,
+            version_id={"PAPER": PAPER_VERSION, "HITRUN": HITRUN_VERSION}.get(mode),
+            exclude_version_prefix="PAPER" if mode == "LIVE" else None,
         )
 
         # Hourly UTC expectancy breakdown
@@ -353,6 +354,9 @@ def create_app(orchestrator: TradingOrchestrator) -> FastAPI:
     from backend.api.setup_routes import register_setup_routes
 
     register_setup_routes(api, orchestrator)
+    from backend.api.paper_routes import register_paper_routes
+
+    register_paper_routes(api, orchestrator)
     app.include_router(public)
     app.include_router(bridge)
     app.include_router(api)

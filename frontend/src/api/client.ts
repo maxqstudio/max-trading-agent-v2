@@ -103,6 +103,8 @@ export const api = {
     req<any>('/api/control/kill', { method: 'POST', body: JSON.stringify({ mode, confirm_code }) }),
   closePosition: (ticket: number) => req<any>(`/api/control/close/${ticket}`, { method: 'POST' }),
   getSetup: () => req<any>('/api/setup'),
+  getPaperCompare: () => req<any>('/api/paper/compare'),
+  saveExits: (body: Record<string, unknown>) => req<any>('/api/setup/exits', { method: 'PUT', body: JSON.stringify(body) }),
   saveLlmSetup: (body: Record<string, unknown>) => req<any>('/api/setup/llm', { method: 'PUT', body: JSON.stringify(body) }),
   listModels: (provider: string, api_key = '', base_url = '') =>
     req<any>('/api/setup/llm/models', { method: 'POST', body: JSON.stringify({ provider, api_key, base_url }) }),
