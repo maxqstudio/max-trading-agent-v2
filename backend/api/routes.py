@@ -217,7 +217,7 @@ def create_app(orchestrator: TradingOrchestrator) -> FastAPI:
             "auto_promote_challenger": orchestrator.config.app.auto_promote_challenger,
             "hard_guard": orchestrator.hard_guard.model_dump(),
             "symbol_specs": [s.model_dump() for s in orchestrator.specs.values()],
-            "llm_provider": orchestrator.env.llm_provider,
+            "llm_provider": ",".join(r.name for r in orchestrator.llm.active) or "deterministic",
             "telegram_configured": bool(orchestrator.env.telegram_bot_token and orchestrator.env.telegram_chat_id),
             "bridge_token_masked": ("..." + orchestrator.env.bridge_auth_token[-4:]) if orchestrator.env.bridge_auth_token else "(not set)",
             "live_trading_enabled": orchestrator.env.allow_live_trading,
@@ -303,6 +303,34 @@ def create_app(orchestrator: TradingOrchestrator) -> FastAPI:
         if not ok:
             raise HTTPException(status_code=404, detail="Position ticket not found")
         return {"closing_ticket": ticket}
+
+    # --- LLM providers (Claude first). Keys are shown masked; they are only ever set in .env ---
+    @api.get("/llm/status")
+    async def llm_status() -> dict[str, Any]:
+        return {**orchestrator.llm.status(), "last_reflection_error": orchestrator.reflector.last_error}
+
+    @api.post("/llm/test")
+    async def llm_test() -> dict[str, Any]:
+        from backend.llm.base import LLMRequest
+
+        results = []
+        for rp in orchestrator.llm.active:
+            single = type(orchestrator.llm)(resolved=[rp], factory=orchestrator.llm.factory)
+            req = LLMRequest(
+                task="ping",
+                system="You are a connectivity check. Answer with the JSON requested.",
+                user='Reply with {"ok": true}.',
+                schema={"type": "object", "additionalProperties": False, "required": ["ok"], "properties": {"ok": {"type": "boolean"}}},
+                timeout_s=20.0,
+                max_tokens=1000,
+                effort="low",
+            )
+            try:
+                res, _ = await single.complete(req)
+                results.append({"provider": rp.name, "ok": True, "model": res.model, "latency_ms": res.latency_ms})
+            except Exception as exc:
+                results.append({"provider": rp.name, "ok": False, "error": str(exc)[:300]})
+        return {"results": results}
 
     @api.post("/demo/signal")
     async def demo_signal(symbol: str = "XAUUSD") -> dict[str, Any]:

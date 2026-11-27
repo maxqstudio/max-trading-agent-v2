@@ -110,12 +110,9 @@ class EnvSettings(BaseSettings):
     control_api_token: str = ""
     # Real-money switch. Only settable in .env, never from the dashboard, Telegram or the LLM.
     allow_live_trading: bool = False
-    llm_provider: str = "deterministic"
-    gemini_api_key: str = ""
-    openai_api_key: str = ""
-    anthropic_api_key: str = ""
-    ollama_base_url: str = "http://127.0.0.1:11434"
-    llm_model: str = "gemini-2.5-flash"
+    # LLM providers are resolved by backend/llm/settings.py straight from .env + environment
+    # (LLM_PROVIDER_CHAIN, ANTHROPIC_API_KEY, GEMINI_MODEL, ...). Kept here for legacy .env files only.
+    llm_provider: str = ""
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     api_host: str = "127.0.0.1"
