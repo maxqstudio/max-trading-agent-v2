@@ -69,8 +69,20 @@ def ensure_mt5_ea() -> None:
         print(f"  [WARN] EA MT5 belum terpasang otomatis ({type(exc).__name__}). Jalankan: python scripts/mt5_ea.py")
 
 
+def dashboard_is_current() -> bool:
+    """True when frontend/dist was built after the last change to the dashboard sources."""
+    built = ROOT / "frontend" / "dist" / "index.html"
+    if not built.exists():
+        return False
+    front = ROOT / "frontend"
+    sources = [p for p in (front / "src").rglob("*") if p.is_file()] if (front / "src").exists() else []
+    sources += [p for p in (front / n for n in ("index.html", "package.json", "vite.config.ts")) if p.exists()]
+    newest = max((p.stat().st_mtime for p in sources), default=0.0)
+    return built.stat().st_mtime >= newest
+
+
 def ensure_dashboard() -> None:
-    if (ROOT / "frontend" / "dist" / "index.html").exists():
+    if dashboard_is_current():
         print("  [OK] Dashboard sudah ter-build")
         return
     npm = shutil.which("npm.cmd") or shutil.which("npm")
@@ -149,8 +161,8 @@ def launch(py: Path, sim: bool) -> int:
     print(f"  Uang asli   : {'DIIZINKAN di .env (hati-hati!)' if live else 'TERKUNCI (ALLOW_LIVE_TRADING=false)'}")
     if token:
         copied = copy_to_clipboard(token)
-        where = "sudah disalin ke clipboard, tinggal Ctrl+V" if copied else "ada di file .env (CONTROL_API_TOKEN)"
-        print(f"  Token login : ...{token[-4:]} — {where} saat dashboard meminta")
+        where = "juga disalin ke clipboard" if copied else "lengkapnya di file .env (CONTROL_API_TOKEN)"
+        print(f"  Token login : ...{token[-4:]} — otomatis dikirim ke dashboard, {where}")
     if not sim:
         print("  MT5         : EA 'MaxTradingBridge' sudah dipasang otomatis (token sudah terisi).")
         print("                Di MT5: Tools > Options > Expert Advisors > izinkan WebRequest ke " + URL)
@@ -159,7 +171,9 @@ def launch(py: Path, sim: bool) -> int:
     print("  Ganti mode / ulang setup: jalankan  start_all.bat --setup")
     print("-" * 64 + "\n")
 
-    threading.Timer(3.0, lambda: webbrowser.open(URL)).start()
+    # The token rides in the URL fragment (never sent to the server); the dashboard saves it.
+    open_url = f"{URL}/#token={token}" if token else URL
+    threading.Timer(3.0, lambda: webbrowser.open(open_url)).start()
     cmd = [str(py), "-m", "backend.main"] + (["--sim"] if sim else [])
     try:
         return subprocess.run(cmd, cwd=ROOT).returncode
@@ -182,6 +196,9 @@ def main() -> int:
         if probe.returncode != 0:
             print("  Memperbarui dependency Python...")
             subprocess.run([str(py), "-m", "pip", "install", "-q", "-e", ".[dev]"], cwd=ROOT, check=False)
+        if not dashboard_is_current():
+            print("  Dashboard diperbarui, membangun ulang...")
+            ensure_dashboard()
         sim = env_value("START_MODE") == "sim"
         if not sim:
             ensure_mt5_ea()
