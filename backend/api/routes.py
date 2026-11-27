@@ -156,7 +156,7 @@ def create_app(orchestrator: TradingOrchestrator) -> FastAPI:
         )
         if snap is None:
             raise HTTPException(status_code=400, detail="No active Challenger to promote")
-        orchestrator.apply_active_config(orchestrator.gate.active_config)
+        orchestrator.apply_champion_config(orchestrator.gate.active_config)
         for s in orchestrator.gate.snapshots:
             await orchestrator.db.save_snapshot(s)
         return {"promoted": snap.model_dump(mode="json")}
@@ -173,7 +173,7 @@ def create_app(orchestrator: TradingOrchestrator) -> FastAPI:
         restored = orchestrator.gate.rollback_to(req.version_id, auto=False)
         if restored is None:
             raise HTTPException(status_code=404, detail=f"Snapshot {req.version_id} not found")
-        orchestrator.apply_active_config(orchestrator.gate.active_config)
+        orchestrator.apply_champion_config(orchestrator.gate.active_config)
         for s in orchestrator.gate.snapshots:
             await orchestrator.db.save_snapshot(s)
         return {"restored": restored.model_dump(mode="json")}
@@ -188,15 +188,20 @@ def create_app(orchestrator: TradingOrchestrator) -> FastAPI:
         # LIVE = real MT5 fills (demo or live account), PAPER = virtual SHADOW_ONLY fills,
         # SHADOW = challenger arena.
         # PAPER = Normal paper book, HITRUN = Hit & Run paper book.
-        from backend.engine.orchestrator import HITRUN_VERSION, PAPER_VERSION, RAW_VERSION
+        from backend.engine.orchestrator import HITRUN_VERSION, PAPER_VERSION, RAW_HITRUN_VERSION, RAW_VERSION
 
-        is_shadow = True if mode == "SHADOW" else (False if mode in ("LIVE", "PAPER", "HITRUN", "RAW") else None)
+        is_shadow = True if mode == "SHADOW" else (False if mode in ("LIVE", "PAPER", "HITRUN", "RAW", "RAW_HITRUN") else None)
         sym = None if (not symbol or symbol == "ALL") else symbol
         trades = await orchestrator.db.list_trades(
             limit=limit,
             is_shadow=is_shadow,
             symbol=sym,
-            version_id={"PAPER": PAPER_VERSION, "HITRUN": HITRUN_VERSION, "RAW": RAW_VERSION}.get(mode),
+            version_id={
+                "PAPER": PAPER_VERSION,
+                "HITRUN": HITRUN_VERSION,
+                "RAW": RAW_VERSION,
+                "RAW_HITRUN": RAW_HITRUN_VERSION,
+            }.get(mode),
             exclude_version_prefix="PAPER" if mode == "LIVE" else None,
         )
 

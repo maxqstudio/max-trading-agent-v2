@@ -58,8 +58,13 @@ export default function App() {
   const ddPct = state?.account?.daily_dd_pct ?? 0;
   const staleBridge = state ? !state.bridge_connected : !wsConnected;
   const paperPositions = state?.paper?.positions || [];
-  const floatingTotal =
-    (state?.positions || []).reduce((acc, p) => acc + p.profit, 0) + paperPositions.reduce((acc, p) => acc + p.profit, 0);
+  const normalPaperPositions = state?.paper?.books?.normal?.positions || paperPositions.filter((p) => !p.book || p.book === 'normal');
+  const hasMt5Positions = (state?.positions?.length || 0) > 0;
+  const floatingTotal = hasMt5Positions
+    ? (state?.positions || []).reduce((acc, p) => acc + p.profit, 0)
+    : normalPaperPositions.reduce((acc, p) => acc + p.profit, 0);
+  const rawEaVer = state?.hard_guard?.ea_version;
+  const displayVersion = rawEaVer ? `v${rawEaVer.replace(/^v/i, '').replace(/\.0$/, '')}` : 'v2.2';
 
   const filteredDecisions = (state?.decisions || []).filter(
     (d) => logFilter === 'ALL' || d.category === logFilter
@@ -96,8 +101,8 @@ export default function App() {
             <div>
               <div className="flex items-center gap-1.5 leading-none">
                 <span className="font-bold tracking-wider text-xs">MAX QUANT</span>
-                <span className="mono text-xs px-1.5 py-0.5 rounded bg-[#10B981]/15 text-[#10B981] border border-[#10B981]/40 font-bold">
-                  {state?.champion_version || 'v1.0'}
+                <span className="mono text-xs px-1.5 py-0.5 rounded bg-[#10B981]/15 text-[#10B981] border border-[#10B981]/40 font-bold" title={rawEaVer ? `MT5 EA ${rawEaVer}` : 'EA v2.2'}>
+                  {displayVersion}
                 </span>
               </div>
               <div className="text-xs text-[#8A9BB5] mt-0.5">MT5 trading robot</div>
@@ -265,7 +270,8 @@ export default function App() {
               <div className="flex justify-between"><span className="text-[#8A9BB5]">AI Scans</span><span className="mono font-bold">{state?.scans_count ?? 0}</span></div>
               <div className="flex justify-between"><span className="text-[#8A9BB5]">Paper Normal</span><span className="mono font-bold text-[#F59E0B]">${(state?.paper?.books?.normal?.equity ?? state?.paper?.equity ?? 10000).toFixed(0)}</span></div>
               <div className="flex justify-between"><span className="text-[#8A9BB5]">Paper Hit &amp; Run</span><span className="mono font-bold text-[#EC4899]">${(state?.paper?.books?.hitrun?.equity ?? 10000).toFixed(0)}</span></div>
-              <div className="flex justify-between" title="Every setup that passed risk, including the ones AI Supervisor rejected"><span className="text-[#8A9BB5]">Paper No Veto</span><span className="mono font-bold text-[#14B8A6]">${(state?.paper?.books?.raw?.equity ?? 10000).toFixed(0)}</span></div>
+              <div className="flex justify-between" title="Every risk-approved setup (Normal exit), ignoring filters and AI Supervisor"><span className="text-[#8A9BB5]">Paper No Veto</span><span className="mono font-bold text-[#14B8A6]">${(state?.paper?.books?.raw?.equity ?? 10000).toFixed(0)}</span></div>
+              <div className="flex justify-between" title="Every risk-approved setup (Hit & Run exit), ignoring filters and AI Supervisor"><span className="text-[#8A9BB5]">Paper No Veto H&amp;R</span><span className="mono font-bold text-[#A855F7]">${(state?.paper?.books?.raw_hitrun?.equity ?? 10000).toFixed(0)}</span></div>
               <div className="flex justify-between" title="Evolved strategy version being tested alongside (challenger)"><span className="text-[#8A9BB5]">Challenger (evolution)</span><span className="mono font-bold text-[#8B5CF6]">${(state?.shadow_equity ?? 10000).toFixed(0)}</span></div>
             </div>
           </div>
@@ -370,7 +376,7 @@ export default function App() {
                       <tbody className="divide-y divide-[#1F2D45]">
                         {paperPositions.map((p) => (
                           <tr key={`paper-${p.book ?? 'normal'}-${p.symbol}`}>
-                            <td className="py-2 px-2"><div className="mono font-bold">{p.symbol} <span className={`px-1 rounded text-[10px] ${p.book === 'hitrun' ? 'bg-[#EC4899]/15 text-[#EC4899]' : p.book === 'raw' ? 'bg-[#14B8A6]/15 text-[#14B8A6]' : 'bg-[#F59E0B]/15 text-[#F59E0B]'}`}>{p.book === 'hitrun' ? 'HIT&RUN' : p.book === 'raw' ? 'TANPA VETO' : 'NORMAL'}</span></div><div className="text-[#8A9BB5]">{human(p.strategy_id)}</div></td>
+                            <td className="py-2 px-2"><div className="mono font-bold">{p.symbol} <span className={`px-1 rounded text-[10px] ${p.book === 'hitrun' ? 'bg-[#EC4899]/15 text-[#EC4899]' : p.book === 'raw_hitrun' ? 'bg-[#A855F7]/15 text-[#A855F7]' : p.book === 'raw' ? 'bg-[#14B8A6]/15 text-[#14B8A6]' : 'bg-[#F59E0B]/15 text-[#F59E0B]'}`}>{p.book === 'hitrun' ? 'HIT&RUN' : p.book === 'raw_hitrun' ? 'NO VETO H&R' : p.book === 'raw' ? 'NO VETO' : 'NORMAL'}</span></div><div className="text-[#8A9BB5]">{human(p.strategy_id)}</div></td>
                             <td className="py-2 px-2 mono"><span className={`px-1.5 py-0.5 rounded font-bold ${p.side === 'BUY' ? 'bg-[#10B981]/15 text-[#10B981]' : 'bg-[#EF4444]/15 text-[#EF4444]'}`}>{p.side}</span> {p.volume}</td>
                             <td className="py-2 px-2 mono">{p.entry_price} → <b>{p.current_price}</b></td>
                             <td className={`py-2 px-2 mono font-bold ${p.profit >= 0 ? 'text-[#10B981]' : 'text-[#EF4444]'}`}>{p.profit >= 0 ? '+' : ''}${p.profit.toFixed(2)}</td>

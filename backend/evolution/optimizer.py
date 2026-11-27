@@ -17,7 +17,7 @@ from backend.risk.manager import DEFAULT_SPECS
 
 TUNABLE_SPACE: dict[str, tuple[float, float]] = {
     "risk.max_spread_atr_ratio": (0.18, 0.38),
-    "ai.ml_min_probability": (0.52, 0.68),
+    "ai.ml_min_probability": (0.46, 0.64),
     "ai.rl_exit_be_trigger_r": (0.65, 1.15),
     "ai.rl_exit_trail_trigger_r": (1.00, 1.70),
     "strategies.liquidity_sweep.min_wick_ratio": (0.48, 0.70),

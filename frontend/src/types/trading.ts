@@ -175,10 +175,19 @@ export interface LiveStateSnapshot {
   supervisor?: SupervisorStatus;
   llm?: LLMBrief;
   paper?: PaperBook;
+  hard_guard?: {
+    ea_version?: string;
+    synced?: boolean;
+    hard_max_daily_dd_pct?: number;
+    hard_max_lot?: number;
+    hard_max_positions?: number;
+    heartbeat_timeout_sec?: number;
+    order_ttl_ms?: number;
+  };
 }
 
 export interface PaperPosition {
-  book?: 'normal' | 'hitrun' | 'raw';
+  book?: 'normal' | 'hitrun' | 'raw' | 'raw_hitrun';
   label?: string;
   symbol: string;
   side: 'BUY' | 'SELL';

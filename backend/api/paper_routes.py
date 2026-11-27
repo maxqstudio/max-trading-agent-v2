@@ -72,7 +72,7 @@ def register_paper_routes(api: APIRouter, orch: TradingOrchestrator) -> None:
         return {
             "rows": rows,
             "ai_cost_today_usd": ai_cost,
-            "note": "Normal and Hit & Run use the same setups (passed risk and supervisor). No Veto opens every setup that passed risk, including the ones AI Supervisor rejected.",
+            "note": "Full 2x2 matrix: Normal & Hit & Run trade only setups approved by filters + AI Supervisor; No Veto (Normal) & No Veto (Hit & Run) open every risk-approved setup.",
             "learning": {
                 "adaptive": orch.config.exits.adaptive,
                 "min_samples": orch.exit_selector.min_samples,

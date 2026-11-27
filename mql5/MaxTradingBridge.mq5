@@ -39,6 +39,7 @@ string         g_logical[];
 string         g_broker[];
 datetime       g_lastBarTime[];
 int            g_backfillRemaining[];
+int            g_backfillRetries[];
 datetime       g_dayStartDate         = 0;
 double         g_dayStartEquity       = 0.0;
 datetime       g_lastPythonHeartbeat  = 0;
@@ -453,20 +454,33 @@ string BuildSyncJson() {
    }
    j += "],";
 
-   // Chunked Startup Historical M1 Backfill (populates H1/M15 Ichimoku, Yesterday Range, and DL/ML instantly)
+   // Chunked Startup Historical M1 Backfill (newest -> oldest so live chart candles never disappear!)
    j += "\"history_bars\":[";
    bool firstHist = true;
    int chunkBudget = BackfillChunkSize > 0 ? BackfillChunkSize : 300;
+   int targetBars  = MathMax(0, BackfillBars);
    for(int i = 0; i < nSym; i++) {
-      if(g_backfillRemaining[i] <= 0) continue;
+      if(g_backfillRemaining[i] <= 0 || targetBars <= 0) continue;
       string bs = g_broker[i];
       int digs  = (int)SymbolInfoInteger(bs, SYMBOL_DIGITS);
-      int take  = MathMin(g_backfillRemaining[i], chunkBudget);
-      int startShift = g_backfillRemaining[i] - take + 1; // shift 1 = latest closed bar
+      int fetchedSoFar = targetBars - g_backfillRemaining[i];
+      int startShift   = fetchedSoFar + 1; // shift 1 = newest closed bar first, then older chunks
+      int take         = MathMin(g_backfillRemaining[i], chunkBudget);
       MqlRates hRates[];
       int copied = CopyRates(bs, PERIOD_M1, startShift, take, hRates);
-      g_backfillRemaining[i] -= take;
-      if(copied <= 0) continue;
+      if(copied <= 0) {
+         // Broker may still be downloading M1 history for non-chart symbols: retry up to 4 syncs before finishing
+         g_backfillRetries[i]++;
+         if(g_backfillRetries[i] >= 4) g_backfillRemaining[i] = 0;
+         continue;
+      }
+      g_backfillRetries[i] = 0;
+      g_backfillRemaining[i] = MathMax(0, g_backfillRemaining[i] - copied);
+      if(copied < take) {
+         // Broker returned fewer bars than requested — allow 1 more attempt in case history is still paging
+         if(g_backfillRetries[i] >= 1) g_backfillRemaining[i] = 0;
+         else g_backfillRetries[i]++;
+      }
       ArraySetAsSeries(hRates, false);
       for(int k = 0; k < copied; k++) {
          if(!firstHist) j += ",";
@@ -640,10 +654,12 @@ void AddSymbol(const string logical, const string broker) {
    ArrayResize(g_broker, n + 1);
    ArrayResize(g_lastBarTime, n + 1);
    ArrayResize(g_backfillRemaining, n + 1);
+   ArrayResize(g_backfillRetries, n + 1);
    g_logical[n] = logical;
    g_broker[n] = broker;
    g_lastBarTime[n] = 0;
    g_backfillRemaining[n] = MathMax(0, BackfillBars);
+   g_backfillRetries[n] = 0;
    SymbolSelect(broker, true);
 }
 
@@ -672,6 +688,7 @@ int OnInit() {
    ArrayResize(g_broker, 0);
    ArrayResize(g_lastBarTime, 0);
    ArrayResize(g_backfillRemaining, 0);
+   ArrayResize(g_backfillRetries, 0);
    if(IncludeChartSymbol) AddSymbol(StripAffixes(_Symbol), _Symbol);
    for(int i = 0; i < n; i++) {
       if(watch[i] == "") continue;
@@ -686,7 +703,7 @@ int OnInit() {
    g_dayStartDate        = TimeGMT();
    g_lastPythonHeartbeat = TimeGMT();
    EventSetMillisecondTimer(SyncIntervalMs);
-   Print("MaxTradingBridge v2.10 initialized. Bridge URL: ", BridgeUrl);
+   Print("MaxTradingBridge v2.20 initialized. Bridge URL: ", BridgeUrl);
    return(INIT_SUCCEEDED);
 }
 
@@ -716,7 +733,7 @@ void OnTimer() {
       g_lastPythonHeartbeat = TimeGMT();
       if(!g_connected) {
          Print("MaxTradingBridge: CONNECTED to robot (", BridgeUrl, ")");
-         Comment("MaxTradingBridge v2.10 | CONNECTED to robot | ", ArraySize(g_logical), " symbols");
+         Comment("MaxTradingBridge v2.20 | CONNECTED to robot | ", ArraySize(g_logical), " symbols");
       }
       g_connected = true;
       string respStr = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
@@ -726,7 +743,7 @@ void OnTimer() {
       if(g_connected || code != g_lastSyncCode || TimeGMT() - g_lastErrorPrint >= 10) {
          string hint = SyncErrorHint(code, err);
          Print("MaxTradingBridge: sync GAGAL (http=", code, ", err=", err, "). ", hint);
-         Comment("MaxTradingBridge v2.10 | NOT CONNECTED (http=", code, ", err=", err, ")\n", hint);
+         Comment("MaxTradingBridge v2.20 | NOT CONNECTED (http=", code, ", err=", err, ")\n", hint);
          g_lastErrorPrint = TimeGMT();
       }
       g_connected = false;

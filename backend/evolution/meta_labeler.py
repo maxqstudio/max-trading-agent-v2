@@ -12,6 +12,21 @@ from sklearn.metrics import brier_score_loss
 from backend.features.dataset import META_FEATURE_NAMES
 
 
+def effective_ml_cutoff(ml_min_probability: float, rr_ratio: float) -> float:
+    """RR-aware calibrated win probability cutoff so positive-EV high-RR setups are not starved.
+
+    For a 1:1 trade (RR=1.0, break-even WR=50%), the cutoff equals ``ml_min_probability``.
+    For higher RR (e.g. RR=1.6..2.2, break-even WR=31..38%), the cutoff scales with the
+    break-even win rate plus the operator's safety margin, while monotonically respecting
+    any manual tightening of ``ml_min_probability``.
+    """
+    rr = max(0.5, float(rr_ratio))
+    be_wr = 1.0 / (1.0 + rr)
+    margin = max(0.02, float(ml_min_probability) - 0.50)
+    ev_floor = be_wr + margin + 0.04
+    return round(max(0.38, min(float(ml_min_probability), ev_floor)), 4)
+
+
 class CalibratedMetaLabeler:
     """Pillar 2 (ML): Calibrated HistGradientBoosting Meta-Labeler predicting P(win | signal, regime, DL, spread)."""
 

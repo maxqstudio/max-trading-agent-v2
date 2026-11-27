@@ -1,6 +1,6 @@
 app:
   name: "Max Trading Agent v2"
-  version: "v1.0"
+  version: "v2.2"
   # SHADOW_ONLY = paper trading (default, nothing is sent to MT5)
   # MT5_DEMO = orders on a DEMO account only | MT5_LIVE = real money, also needs ALLOW_LIVE_TRADING=true in .env
   trading_mode: "SHADOW_ONLY" # SIMULATOR | SHADOW_ONLY | MT5_DEMO | MT5_LIVE
@@ -56,7 +56,7 @@ ai:
   dl_min_train_samples: 120
   dl_epochs: 18
   dl_lr: 0.008
-  ml_min_probability: 0.56
+  ml_min_probability: 0.52
   ml_min_train_samples: 80
   bandit_forgetting_factor: 0.985
   rl_exit_enabled: true

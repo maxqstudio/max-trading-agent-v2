@@ -13,13 +13,14 @@ from backend.core.models import (
     SymbolSpec,
     TradeRecord,
 )
-from backend.evolution.meta_labeler import CalibratedMetaLabeler
+from backend.engine.filters import TREND_STRATEGIES, htf_bucket
+from backend.evolution.meta_labeler import CalibratedMetaLabeler, effective_ml_cutoff
 from backend.evolution.sequence_net import SequenceConvNet
 from backend.features.dataset import build_sequence_tensor, extract_meta_features
 from backend.features import ichimoku
 from backend.features.daylevels import prev_day_series
 from backend.features.structure import structure_context
-from backend.features.htf import htf_bias_series
+from backend.features.htf import alignment, htf_bias_series
 from backend.features.regime import classify_regime
 from backend.risk.manager import DEFAULT_SPECS
 from backend.strategies.registry import StrategySuite
@@ -104,6 +105,26 @@ class CausalBacktester:
                 # Select strongest signal on bar i
                 best_sig = max(sigs, key=lambda s: s.confidence)
 
+                # Mirror live P0 entry guards so ML meta-samples & WFO train on clean setups
+                flt = config.filters
+                if flt.block_breakout_in_ranging and best_sig.strategy_id == "micro_breakout" and assess.regime.value == "RANGING":
+                    i += 1
+                    continue
+                if flt.trend_strategies_require_htf and best_sig.strategy_id in TREND_STRATEGIES:
+                    side_sign = 1.0 if best_sig.side == Side.BUY else -1.0
+                    bkt = htf_bucket(alignment(side_sign, m15_bias[i]), alignment(side_sign, h1_bias[i]), flt.htf_timeframe)
+                    if bkt == "against":
+                        i += 1
+                        continue
+
+                # Mirror live Cost-to-Risk Gate using real symbol commission
+                money_per_px = (spec.tick_value / spec.tick_size) if spec.tick_size > 0 else 0.0
+                comm_px = (spec.commission_per_lot / money_per_px) if money_per_px > 0 else 0.0
+                sig_sl_dist = max(abs(best_sig.entry_price - best_sig.sl_price), assess.indicators.atr14 * 0.5, 1e-12)
+                if (spread_price + comm_px) / sig_sl_dist > config.risk.max_cost_to_risk_ratio:
+                    i += 1
+                    continue
+
                 # Causal DL inference
                 seq = build_sequence_tensor(window, seq_len=config.ai.dl_seq_len, point=spec.point)
                 dl_pred = dl_net.predict(seq) if (dl_net is not None and dl_net.trained) else DLPrediction()
@@ -113,10 +134,11 @@ class CausalBacktester:
                     structure=structure_context(window, ichi_m15[i], prev_days[i]),
                 )
 
-                # ML Meta-Labeler filter (skip filtering if collecting raw training data)
+                # ML Meta-Labeler filter (RR-aware EV cutoff; skipped when collecting raw training data)
                 ml_prob = ml_labeler.predict_win_probability(feat_vec) if (ml_labeler and ml_labeler.trained) else 0.62
                 if not collect_meta_samples and ml_labeler and ml_labeler.trained:
-                    if ml_prob < config.ai.ml_min_probability:
+                    sig_rr = abs(best_sig.tp_price - best_sig.entry_price) / sig_sl_dist
+                    if ml_prob < effective_ml_cutoff(config.ai.ml_min_probability, sig_rr):
                         i += 1
                         continue
 
@@ -205,8 +227,8 @@ class CausalBacktester:
                     if best_sig.side == Side.BUY
                     else (entry - exit_price) / risk_dist
                 )
-                # Deduct realistic commission impact in R-units (~0.04R per round trip on scalping)
-                comm_r = 0.04
+                # Deduct realistic commission impact in R-units from actual broker spec
+                comm_r = max(0.01, min(0.35, comm_px / max(risk_dist, 1e-12))) if comm_px > 0 else 0.04
                 net_r = raw_pnl_r - comm_r
                 risk_money = equity * (risk_pct / 100.0)
                 pnl_money = risk_money * net_r

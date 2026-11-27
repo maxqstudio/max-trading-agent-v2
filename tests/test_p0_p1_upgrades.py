@@ -402,3 +402,108 @@ async def test_history_bars_backfill_and_clean_paper_reset(tmp_path):
         assert len(db_bars) == 6
     finally:
         await db.close()
+
+
+def test_effective_ml_cutoff_is_rr_aware_and_monotonic():
+    from backend.evolution.meta_labeler import effective_ml_cutoff
+
+    # At RR=1.0 (50% BE WR), cutoff respects ml_min_probability
+    assert effective_ml_cutoff(0.52, 1.0) == 0.52
+    # At RR=1.6 (38.5% BE WR), positive-EV setups at 0.45 pass instead of getting starved at 0.56
+    c16 = effective_ml_cutoff(0.52, 1.6)
+    assert 0.43 <= c16 <= 0.46
+    # At RR=2.0 (33.3% BE WR), cutoff is lower than RR=1.6 yet safely above break-even
+    c20 = effective_ml_cutoff(0.52, 2.0)
+    assert 0.38 <= c20 < c16
+    # Monotonic: raising ml_min_probability always raises the cutoff
+    assert effective_ml_cutoff(0.60, 1.6) > c16
+
+
+def test_hitrun_tuner_ghosts_respect_min_cost_multiple():
+    from backend.engine.hitrun_stop import HitRunArm, HitRunPlan, HitRunTuner
+
+    tuner = HitRunTuner(min_samples=5)
+    arm = HitRunArm(0.9, 5)
+    plan = HitRunPlan(sl=2645.0, volume=0.10, risk_dist=5.0, max_loss=5.70, arm=arm)
+    tuner.spawn("XAUUSD", "RANGING", Side.BUY, 2650.0, 1000, [plan])
+
+    # Friction = $2.00, min_cost_multiple = 2.0 -> floor = $4.00. At net=$2.50, ghost must HOLD!
+    closed_small = tuner.on_tick(
+        "XAUUSD", 2650.32, 2650.42, 1030, 1.0, lambda g, px: 2.50, min_cost_multiple=2.0, friction_at=lambda g: 2.0
+    )
+    assert closed_small == 0
+    assert len(tuner.ghosts["XAUUSD"]) == 1
+
+    # At net=$4.20 >= $4.00, ghost closes and records
+    closed_big = tuner.on_tick(
+        "XAUUSD", 2650.50, 2650.60, 1040, 1.0, lambda g, px: 4.20, min_cost_multiple=2.0, friction_at=lambda g: 2.0
+    )
+    assert closed_big == 1
+    assert tuner.ghosts["XAUUSD"] == []
+
+
+@pytest.mark.asyncio
+async def test_fourth_book_raw_hitrun_and_net_r_and_champion_ops_preserve(tmp_path):
+    from types import SimpleNamespace
+    from backend.engine.orchestrator import RAW_BOOKS, RAW_HITRUN_VERSION
+
+    cfg = TradingConfig()
+    cfg.app.database_path = str(tmp_path / "test4.db")
+    cfg.app.snapshots_dir = str(tmp_path / "snaps4")
+    cfg.app.kill_switch_path = str(tmp_path / "kill4.json")
+    cfg.evolution.auto_warmup_on_backfill = False
+    cfg.supervisor.mode = "hybrid"
+    cfg.filters.htf_mode = "on"
+    cfg.exits.be_at_r = 0.90
+    env = EnvSettings(bridge_auth_token="a" * 32, control_api_token="b" * 32)
+
+    db = Database(cfg.app.database_path)
+    await db.connect()
+    try:
+        orch = TradingOrchestrator(cfg, env, db, llm_router=LLMRouter(resolved=[]))
+        await orch.initialize_from_storage()
+        orch.specs["XAUUSD"] = _xau_spec()
+        orch.ticks["XAUUSD"] = TickSnapshot(symbol="XAUUSD", bid=2650.0, ask=2650.10, spread_points=10, timestamp_ms=int(time.time() * 1000))
+
+        # 1. apply_champion_config updates strategy/AI params while keeping Setup ops (supervisor/filters/exits)
+        champ = TradingConfig()
+        champ.app.version = "v2.3"
+        champ.ai.ml_min_probability = 0.58
+        champ.supervisor.mode = "per_trade"  # should NOT overwrite operator's "hybrid"
+        champ.filters.htf_mode = "off"  # should NOT overwrite operator's "on"
+        champ.exits.be_at_r = 0.50  # should NOT overwrite operator's 0.90
+        orch.apply_champion_config(champ)
+        assert orch.config.ai.ml_min_probability == 0.58
+        assert orch.config.supervisor.mode == "hybrid"
+        assert orch.config.filters.htf_mode == "on"
+        assert orch.config.exits.be_at_r == 0.90
+
+        # 2. Opening RAW_BOOKS opens both "raw" (Normal) and "raw_hitrun" (Hit & Run with its own tighter stop/lot)
+        sig = SimpleNamespace(side=Side.BUY, strategy_id="liquidity_sweep", atr=2.0)
+        risk_dec = SimpleNamespace(volume=0.20, adjusted_sl=2640.0, adjusted_tp=2670.0)
+        assess = SimpleNamespace(regime=MarketRegime.RANGING)
+        await orch._open_paper_position(
+            "XAUUSD", sig, risk_dec, assess, orch.specs["XAUUSD"], 0.65, 0.60, 10.0, books=RAW_BOOKS, veto="REJECT"
+        )
+        assert "XAUUSD" in orch.paper_books["raw"].positions
+        assert "XAUUSD" in orch.paper_books["raw_hitrun"].positions
+        rh = orch.paper_books["raw_hitrun"].positions["XAUUSD"]
+        assert rh.volume <= risk_dec.volume
+        assert rh.version_id == RAW_HITRUN_VERSION
+
+        # 3. Price rallies enough for Hit & Run net take (after comm+spread floor) -> closes raw_hitrun with net_r < gross_r!
+        now_s = int(time.time()) + 30
+        await orch._update_paper_positions_on_tick(
+            TickSnapshot(symbol="XAUUSD", bid=2653.0, ask=2653.10, spread_points=10, timestamp_ms=now_s * 1000),
+            now_s,
+        )
+        assert "XAUUSD" not in orch.paper_books["raw_hitrun"].positions
+        assert "XAUUSD" in orch.paper_books["raw"].positions  # raw (Normal) stays open waiting for TP!
+        rh_trades = await db.list_trades(limit=10, version_id=RAW_HITRUN_VERSION)
+        assert len(rh_trades) == 1
+        tr = rh_trades[0]
+        gross_r = (tr.exit_price - tr.entry_price) / rh.risk_dist
+        assert tr.pnl_r < gross_r  # Net R strictly deducts commission!
+        assert tr.pnl_money > 0
+    finally:
+        await db.close()

@@ -20,7 +20,7 @@ HARD_SAFETY_BOUNDS: dict[str, tuple[float, float]] = {
     "risk.consecutive_loss_limit": (2.0, 6.0),
     "risk.consecutive_loss_cooldown_min": (5.0, 120.0),
     "risk.min_rr_ratio": (1.05, 3.50),
-    "ai.ml_min_probability": (0.50, 0.78),
+    "ai.ml_min_probability": (0.40, 0.78),
     "ai.rl_exit_be_trigger_r": (0.50, 1.50),
     "ai.rl_exit_trail_trigger_r": (0.80, 2.20),
     "ai.rl_exit_partial_trigger_r": (1.00, 3.00),

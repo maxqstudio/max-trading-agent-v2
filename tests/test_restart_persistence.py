@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from backend.bridge.state_machine import IdempotentOrderStateMachine
 from backend.core.config import EnvSettings, load_trading_config
 from backend.core.models import LivePosition, MarketRegime, Side, TickSnapshot, utc_now_ms
-from backend.engine.orchestrator import PAPER_VERSION, TradingOrchestrator
+from backend.engine.orchestrator import PAPER_VERSION, RAW_BOOKS, TradingOrchestrator
 from backend.llm.router import LLMRouter
 from backend.storage.database import Database
 
@@ -39,9 +39,9 @@ def test_paper_position_survives_restart_and_closes_into_journal(tmp_path: Path)
             risk = SimpleNamespace(volume=0.10, adjusted_sl=2645.0, adjusted_tp=2655.0)
             assess = SimpleNamespace(regime=MarketRegime.TRENDING_BULL)
             await orch._open_paper_position("XAUUSD", sig, risk, assess, orch.specs["XAUUSD"], 0.6, 0.55, 20.0)
-            # The "No Veto" book opens before the supervisor; here Claude rejected the setup.
+            # The "No Veto" books (Normal + Hit & Run) open before the supervisor; here supervisor rejected the setup.
             await orch._open_paper_position(
-                "XAUUSD", sig, risk, assess, orch.specs["XAUUSD"], 0.6, 0.55, 20.0, books=("raw",), veto="REJECT"
+                "XAUUSD", sig, risk, assess, orch.specs["XAUUSD"], 0.6, 0.55, 20.0, books=RAW_BOOKS, veto="REJECT"
             )
             assert all("XAUUSD" in b.positions for b in orch.paper_books.values())
             orch.shadow_equity = 10123.45
