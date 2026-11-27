@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import type { LivePosition, RadarSymbol } from '../types/trading';
+import { human } from '../labels';
 
 interface Props {
   symbolData: RadarSymbol | undefined;
@@ -233,7 +234,7 @@ export const LiveCandleChart: React.FC<Props> = ({ symbolData, position }) => {
               O {activeBar.open.toFixed(digs)} H {activeBar.high.toFixed(digs)} L {activeBar.low.toFixed(digs)} C {activeBar.close.toFixed(digs)}
             </span>
             <span className="px-2 py-0.5 rounded bg-[#10B981]/15 text-[#10B981] border border-[#10B981]/40 font-bold">
-              {symbolData.regime}
+              {human(symbolData.regime)}
             </span>
             <span className="px-2 py-0.5 rounded bg-[#06B6D4]/15 text-[#06B6D4] border border-[#06B6D4]/40 font-bold">
               DL {symbolData.dl.prob_up >= symbolData.dl.prob_down ? `${Math.round(symbolData.dl.prob_up * 100)}% UP` : `${Math.round(symbolData.dl.prob_down * 100)}% DN`} • VOL {Math.round(symbolData.dl.vol_expansion * 100)}%

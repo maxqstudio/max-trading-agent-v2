@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Brain, Scale } from 'lucide-react';
 import { api } from '../api/client';
+import { humanText } from '../labels';
 
 // Normal vs Hit & Run on the same setups, plus the real MT5 account, and what the
 // exit-style learner has concluded so far per pair/regime.
@@ -229,7 +230,7 @@ export const PaperCompare: React.FC = () => {
               <tbody className="divide-y divide-[#1F2D45] mono">
                 {groups.map((g) => (
                   <tr key={g.key}>
-                    <td className="py-1 px-2 font-bold">{g.key}</td>
+                    <td className="py-1 px-2 font-bold">{humanText(g.key)}</td>
                     <td className="py-1 px-2 text-right">
                       {g.normal_n} · {signed(g.normal_avg_r)} · {g.normal_wr.toFixed(0)}%
                     </td>

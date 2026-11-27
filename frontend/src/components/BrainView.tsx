@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { api } from '../api/client';
+import { human } from '../labels';
 
 export const BrainView: React.FC<{ symbols: string[] }> = ({ symbols }) => {
   const [sym, setSym] = useState(symbols[0] || 'XAUUSD');
@@ -116,7 +117,7 @@ export const BrainView: React.FC<{ symbols: string[] }> = ({ symbols }) => {
               <tbody className="divide-y divide-[#1F2D45] mono">
                 {(data?.bandit_matrix || []).map((row: any) => (
                   <tr key={row.regime}>
-                    <td className="py-2 pr-2 font-sans font-semibold">{row.regime}</td>
+                    <td className="py-2 pr-2 font-sans font-semibold">{human(row.regime)}</td>
                     {strats.map((s) => {
                       const pct = Math.round((row.weights?.[s] ?? 0.25) * 100);
                       return (
@@ -182,7 +183,7 @@ export const BrainView: React.FC<{ symbols: string[] }> = ({ symbols }) => {
               {(data?.ml_diagnostics?.feature_importances || []).slice(0, 6).map((f: any) => (
                 <div key={f.name} className="space-y-0.5">
                   <div className="flex justify-between mono">
-                    <span>{f.name}</span>
+                    <span>{human(f.name)}</span>
                     <b>{Math.round(f.importance * 100)}%</b>
                   </div>
                   <div className="h-1.5 rounded-full bg-[#070B12] overflow-hidden">

@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { RefreshCw, Check, X, RotateCcw } from 'lucide-react';
 import { api } from '../api/client';
 import { EquityCurveCanvas } from './EquityCurveCanvas';
+import { human } from '../labels';
 
 interface Props {
   onToast: (msg: string) => void;
@@ -30,7 +31,7 @@ export const EvolutionView: React.FC<Props> = ({ onToast }) => {
     setBusy(true);
     try {
       const res = await api.runEvolution();
-      onToast(`Evolution cycle: ${res.status}`);
+      onToast(`Siklus evolusi: ${human(res.status)}`);
       await load();
     } catch (e: any) {
       onToast(`Evolution error: ${e.message}`);
@@ -123,7 +124,7 @@ export const EvolutionView: React.FC<Props> = ({ onToast }) => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#1F2D45]">
-                  <tr><td className="py-1.5 font-sans">OOS Profit Factor</td><td>{cand.champion_oos_metrics.profit_factor.toFixed(2)}</td><td className="text-[#8B5CF6] font-bold">{cand.oos_metrics.profit_factor.toFixed(2)}</td><td>{cand.status}</td></tr>
+                  <tr><td className="py-1.5 font-sans">OOS Profit Factor</td><td>{cand.champion_oos_metrics.profit_factor.toFixed(2)}</td><td className="text-[#8B5CF6] font-bold">{cand.oos_metrics.profit_factor.toFixed(2)}</td><td>{human(cand.status)}</td></tr>
                   <tr><td className="py-1.5 font-sans">OOS Sharpe</td><td>{cand.champion_oos_metrics.sharpe_ratio.toFixed(2)}</td><td className="text-[#8B5CF6] font-bold">{cand.oos_metrics.sharpe_ratio.toFixed(2)}</td><td>{cand.oos_metrics.total_trades} trades</td></tr>
                   <tr><td className="py-1.5 font-sans">Monte Carlo P95 DD</td><td>{cand.champion_oos_metrics.mc_p95_dd_pct.toFixed(2)}%</td><td className="text-[#10B981] font-bold">{cand.oos_metrics.mc_p95_dd_pct.toFixed(2)}%</td><td>Ruin {(cand.oos_metrics.mc_ruin_prob * 100).toFixed(1)}%</td></tr>
                   <tr><td className="py-1.5 font-sans">Live Shadow Arena</td><td>—</td><td className="text-[#06B6D4] font-bold">{cand.shadow_trades}t ({cand.shadow_pnl_r >= 0 ? '+' : ''}{cand.shadow_pnl_r}R)</td><td>PF {cand.shadow_pf.toFixed(2)}</td></tr>
@@ -155,7 +156,7 @@ export const EvolutionView: React.FC<Props> = ({ onToast }) => {
                 <div>
                   <div className="flex items-center gap-2">
                     <span className="mono font-bold">{s.version_id}</span>
-                    <span className={`px-1.5 py-0.5 rounded font-bold ${s.status === 'ACTIVE' ? 'bg-[#10B981]/15 text-[#10B981]' : 'bg-[#3B82F6]/15 text-[#3B82F6]'}`}>{s.status}</span>
+                    <span className={`px-1.5 py-0.5 rounded font-bold ${s.status === 'ACTIVE' ? 'bg-[#10B981]/15 text-[#10B981]' : 'bg-[#3B82F6]/15 text-[#3B82F6]'}`}>{human(s.status)}</span>
                   </div>
                   <div className="text-[#8A9BB5] mt-0.5">{s.note}</div>
                 </div>
