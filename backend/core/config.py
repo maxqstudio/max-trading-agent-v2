@@ -105,6 +105,35 @@ class SupervisorConfig(BaseModel):
     review_in_shadow: bool = True  # also review paper trades so you can judge the supervisor before going live
 
 
+class ExitConfig(BaseModel):
+    """Profit protection for the existing system (MT5 positions + 'existing' paper book)."""
+
+    be_at_r: float = 0.5  # move SL to breakeven once the trade has been +0.5R
+    be_offset_r: float = 0.05
+    trail_start_r: float = 1.0
+    trail_dist_r: float = 0.5
+    # Learn per symbol+regime from the two paper books whether Hit & Run beats Normal,
+    # and use the winner for real MT5 positions once there is enough evidence.
+    adaptive: bool = True
+    adaptive_min_samples: int = 20
+
+
+class HitRunConfig(BaseModel):
+    take_r: float = 0.5  # minimum profit before Hit & Run takes it
+    min_spread_mult: float = 2.0  # and at least 2x spread
+    trail_dist_r: float = 0.15  # 0 = close at once when take_r is reached
+    be_offset_r: float = 0.05
+
+
+class PaperConfig(BaseModel):
+    """Three virtual books run side by side on the same setups, in every trading mode."""
+
+    enabled: bool = True
+    start_equity: float = 10000.0
+    max_hold_min: int = 240
+    hit_run: HitRunConfig = Field(default_factory=HitRunConfig)
+
+
 class TradingConfig(BaseModel):
     app: AppConfig = Field(default_factory=AppConfig)
     instruments: InstrumentsConfig = Field(default_factory=InstrumentsConfig)
@@ -114,6 +143,8 @@ class TradingConfig(BaseModel):
     strategies: dict[str, dict[str, Any]] = Field(default_factory=dict)
     evolution: EvolutionConfig = Field(default_factory=EvolutionConfig)
     supervisor: SupervisorConfig = Field(default_factory=SupervisorConfig)
+    exits: ExitConfig = Field(default_factory=ExitConfig)
+    paper: PaperConfig = Field(default_factory=PaperConfig)
 
 
 class EnvSettings(BaseSettings):

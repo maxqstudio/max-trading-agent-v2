@@ -61,6 +61,16 @@ class SupervisorSetupRequest(BaseModel):
     review_in_shadow: bool | None = None
 
 
+class ExitSetupRequest(BaseModel):
+    be_at_r: float | None = Field(default=None, ge=0.1, le=3.0)
+    trail_start_r: float | None = Field(default=None, ge=0.2, le=5.0)
+    trail_dist_r: float | None = Field(default=None, ge=0.05, le=3.0)
+    hit_take_r: float | None = Field(default=None, ge=0.1, le=3.0)
+    hit_trail_dist_r: float | None = Field(default=None, ge=0.0, le=2.0)
+    hit_min_spread_mult: float | None = Field(default=None, ge=0.0, le=10.0)
+    adaptive: bool | None = None
+
+
 def _mask(key: str) -> str:
     return f"...{key[-4:]}" if len(key) >= 8 else ("(set)" if key else "")
 
@@ -208,6 +218,22 @@ def register_setup_routes(api: APIRouter, orch: TradingOrchestrator, env_path: s
             except Exception as exc:  # noqa: BLE001
                 results.append({"provider": rp.name, "ok": False, "error": str(exc)[:300]})
         return {"results": results}
+
+    @api.put("/setup/exits")
+    async def put_exits(req: ExitSetupRequest) -> dict[str, Any]:
+        ex = orch.config.exits.model_copy(update={
+            k: v for k, v in {"be_at_r": req.be_at_r, "trail_start_r": req.trail_start_r, "trail_dist_r": req.trail_dist_r, "adaptive": req.adaptive}.items()
+            if v is not None
+        })
+        hr = orch.config.paper.hit_run.model_copy(update={
+            k: v for k, v in {"take_r": req.hit_take_r, "trail_dist_r": req.hit_trail_dist_r, "min_spread_mult": req.hit_min_spread_mult}.items()
+            if v is not None
+        })
+        orch.config.exits = ex
+        orch.config.paper = orch.config.paper.model_copy(update={"hit_run": hr})
+        save_local_config("exits", ex.model_dump())
+        save_local_config("paper", orch.config.paper.model_dump())
+        return {"exits": ex.model_dump(), "hit_run": hr.model_dump()}
 
     @api.put("/setup/supervisor")
     async def put_supervisor(req: SupervisorSetupRequest) -> dict[str, Any]:

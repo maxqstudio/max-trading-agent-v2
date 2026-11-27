@@ -40,10 +40,11 @@ export const ForensicsView: React.FC<{ symbols: string[] }> = ({ symbols }) => {
           </div>
           <div className="flex gap-2 text-xs">
             <select value={mode} onChange={(e) => setMode(e.target.value)} className="px-2.5 py-1 rounded cockpit-sub">
-              <option value="ALL">All (Live + Shadow)</option>
+              <option value="ALL">Semua</option>
               <option value="LIVE">MT5 (Demo/Live)</option>
-              <option value="PAPER">Paper</option>
-              <option value="SHADOW">Shadow Only</option>
+              <option value="PAPER">Paper Normal</option>
+              <option value="HITRUN">Paper Hit &amp; Run</option>
+              <option value="SHADOW">Kandidat (Evolusi)</option>
             </select>
             <select value={sym} onChange={(e) => setSym(e.target.value)} className="px-2.5 py-1 rounded cockpit-sub mono">
               <option value="ALL">All Pairs</option>
@@ -79,7 +80,7 @@ export const ForensicsView: React.FC<{ symbols: string[] }> = ({ symbols }) => {
                     <React.Fragment key={t.trade_id}>
                       <tr onClick={() => setExpanded(isOpen ? null : t.trade_id)} className="cursor-pointer hover:bg-[#121B2B]">
                         <td className="py-2 pr-2 mono text-[#8A9BB5]">{t.trade_id}</td>
-                        <td className="py-2 px-2"><span className={`px-1.5 py-0.5 rounded font-bold ${t.is_shadow ? 'bg-[#8B5CF6]/20 text-[#8B5CF6]' : t.version_id === 'PAPER' ? 'bg-[#F59E0B]/20 text-[#F59E0B]' : 'bg-[#3B82F6]/20 text-[#3B82F6]'}`}>{t.is_shadow ? 'SHADOW' : t.version_id === 'PAPER' ? 'PAPER' : 'MT5'}</span></td>
+                        <td className="py-2 px-2"><span className={`px-1.5 py-0.5 rounded font-bold ${t.is_shadow ? 'bg-[#8B5CF6]/20 text-[#8B5CF6]' : t.version_id === 'PAPER-HITRUN' ? 'bg-[#EC4899]/20 text-[#EC4899]' : t.version_id === 'PAPER' ? 'bg-[#F59E0B]/20 text-[#F59E0B]' : 'bg-[#3B82F6]/20 text-[#3B82F6]'}`}>{t.is_shadow ? 'KANDIDAT' : t.version_id === 'PAPER-HITRUN' ? 'HIT&RUN' : t.version_id === 'PAPER' ? 'NORMAL' : 'MT5'}</span></td>
                         <td className="py-2 px-2 mono font-bold">{t.symbol}</td>
                         <td className="py-2 px-2">{t.strategy_id} <span className="text-[#8A9BB5]">• {t.regime}</span></td>
                         <td className={`py-2 px-2 mono font-bold ${t.side === 'BUY' ? 'text-[#10B981]' : 'text-[#EF4444]'}`}>{t.side}</td>

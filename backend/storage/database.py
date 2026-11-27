@@ -231,6 +231,7 @@ class Database:
         symbol: str | None = None,
         version_id: str | None = None,
         exclude_version_id: str | None = None,
+        exclude_version_prefix: str | None = None,
     ) -> list[TradeRecord]:
         clauses: list[str] = []
         params: list[Any] = []
@@ -240,6 +241,9 @@ class Database:
         if exclude_version_id is not None:
             clauses.append("version_id != ?")
             params.append(exclude_version_id)
+        if exclude_version_prefix is not None:
+            clauses.append("version_id NOT LIKE ?")
+            params.append(exclude_version_prefix + "%")
         if is_shadow is not None:
             clauses.append("is_shadow = ?")
             params.append(1 if is_shadow else 0)

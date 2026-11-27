@@ -177,6 +177,8 @@ export interface LiveStateSnapshot {
 }
 
 export interface PaperPosition {
+  book?: 'normal' | 'hitrun';
+  label?: string;
   symbol: string;
   side: 'BUY' | 'SELL';
   volume: number;
@@ -192,6 +194,7 @@ export interface PaperPosition {
 export interface PaperBook {
   equity: number;
   positions: PaperPosition[];
+  books?: Record<string, { label: string; equity: number; positions: PaperPosition[] }>;
 }
 
 export interface SupervisorLast {

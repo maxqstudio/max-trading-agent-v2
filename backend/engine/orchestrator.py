@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import deque
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from backend.bridge.state_machine import IdempotentOrderStateMachine
@@ -33,6 +33,8 @@ from backend.evolution.bandit import ContextualBanditRL
 from backend.evolution.champion_gate import ChampionChallengerGate
 from backend.evolution.llm_reflector import LLMReflectionAnalyst
 from backend.llm.router import LLMRouter
+from backend.engine.exit_policy import HitRun, ProfitLock, evaluate
+from backend.engine.exit_selector import ExitStyleSelector
 from backend.engine.supervisor import SupervisorSettings, TradeSupervisor, build_context, price_drifted, scale_volume
 from backend.evolution.meta_labeler import CalibratedMetaLabeler
 from backend.evolution.optimizer import PurgedWalkForwardOptimizer
@@ -66,9 +68,17 @@ class ShadowPosition:
     volume: float = 0.10
 
 
-PAPER_VERSION = "PAPER"
-PAPER_MAX_HOLD_SEC = 4 * 3600
+PAPER_VERSION = "PAPER"  # Normal book (kept for journal compatibility)
+HITRUN_VERSION = "PAPER-HITRUN"
+PAPER_BOOKS: dict[str, str] = {"normal": PAPER_VERSION, "hitrun": HITRUN_VERSION}
+PAPER_LABELS: dict[str, str] = {"normal": "Normal", "hitrun": "Hit & Run"}
 PAPER_START_EQUITY = 10000.0
+
+
+@dataclass
+class PaperBook:
+    equity: float = PAPER_START_EQUITY
+    positions: dict[str, ShadowPosition] = field(default_factory=dict)
 
 
 def _pos_to_dict(p: ShadowPosition) -> dict[str, Any]:
@@ -168,8 +178,12 @@ class TradingOrchestrator:
         self.shadow_positions: dict[str, ShadowPosition] = {}
         self.shadow_equity: float = 10000.0
         # Paper trading (SHADOW_ONLY mode): the champion's approved trades, filled virtually.
-        self.paper_positions: dict[str, ShadowPosition] = {}
-        self.paper_equity: float = PAPER_START_EQUITY
+        # Paper books run side by side on the same approved setups, in every mode:
+        # "normal" = existing exits + profit lock, "hitrun" = take profit fast.
+        self.exit_selector = ExitStyleSelector(min_samples=config.exits.adaptive_min_samples)
+        self.paper_books: dict[str, PaperBook] = {
+            k: PaperBook(equity=config.paper.start_equity) for k in PAPER_BOOKS
+        }
         self._tracking_sig: tuple[int, ...] = ()
         self.shadow_suite: StrategySuite = StrategySuite.from_config(config)
 
@@ -217,13 +231,20 @@ class TradingOrchestrator:
                 p = _pos_from_dict(d)
                 if p:
                     self.shadow_positions[p.symbol] = p
-        paper = await self.db.get_kv("paper_book")
-        if paper:
-            self.paper_equity = float(paper.get("equity", self.paper_equity))
-            for d in paper.get("positions", []):
+        books = await self.db.get_kv("paper_books")
+        if not books:
+            legacy = await self.db.get_kv("paper_book")  # single book from the previous version
+            books = {"normal": legacy} if legacy else {}
+        for name, data in (books or {}).items():
+            if name not in self.paper_books or not isinstance(data, dict):
+                continue
+            book = self.paper_books[name]
+            book.equity = float(data.get("equity", book.equity))
+            for d in data.get("positions", []):
                 p = _pos_from_dict(d)
                 if p:
-                    self.paper_positions[p.symbol] = p
+                    book.positions[p.symbol] = p
+        await self._rebuild_exit_selector()
         self.order_sm.import_tracking(await self.db.get_kv("mt5_tracking"))
         self._tracking_sig = tuple(sorted(self.order_sm.active_positions))
 
@@ -651,6 +672,8 @@ class TradingOrchestrator:
         ml_prob: float, dl_align: float, b_weight: float, spread_pts: float, lat_ms: float, note: str = "",
     ) -> None:
         tick = self.ticks.get(sym)
+        if self.config.paper.enabled:
+            await self._open_paper_position(sym, best_sig, risk_dec, assess, spec, ml_prob, dl_align, spread_pts)
         # In SHADOW_ONLY mode, log & skip real MT5 dispatch
         if self.config.app.trading_mode == TradingMode.SHADOW_ONLY:
             await self._log_decision(
@@ -664,7 +687,6 @@ class TradingOrchestrator:
                     latency_ms=lat_ms,
                 )
             )
-            await self._open_paper_position(sym, best_sig, risk_dec, assess, spec, ml_prob, dl_align, spread_pts)
             return
 
         # Dispatch idempotent OrderCommand to MT5 EA
@@ -718,8 +740,11 @@ class TradingOrchestrator:
 
     async def _save_paper(self) -> None:
         await self.db.set_kv(
-            "paper_book",
-            {"equity": self.paper_equity, "positions": [_pos_to_dict(p) for p in self.paper_positions.values()]},
+            "paper_books",
+            {
+                name: {"equity": b.equity, "positions": [_pos_to_dict(p) for p in b.positions.values()]}
+                for name, b in self.paper_books.items()
+            },
             utc_now_ms(),
         )
 
@@ -727,29 +752,35 @@ class TradingOrchestrator:
         self, sym: str, sig: Any, risk_dec: Any, assess: Any, spec: SymbolSpec,
         ml_prob: float, dl_align: float, spread_pts: float,
     ) -> None:
-        """Fill an approved SHADOW_ONLY trade virtually at the current bid/ask (one per symbol)."""
+        """Fill an approved trade virtually at bid/ask in every paper book (one position per symbol)."""
         tick = self.ticks.get(sym)
-        if sym in self.paper_positions or tick is None or risk_dec.volume <= 0:
+        if tick is None or risk_dec.volume <= 0:
             return
         entry = tick.ask if sig.side == Side.BUY else tick.bid
         sl, tp = risk_dec.adjusted_sl, risk_dec.adjusted_tp
-        self.paper_positions[sym] = ShadowPosition(
-            symbol=sym,
-            strategy_id=sig.strategy_id,
-            regime=assess.regime,
-            side=sig.side,
-            entry_price=round(entry, spec.digits),
-            sl=sl,
-            tp=tp,
-            risk_dist=max(abs(entry - sl), spec.point),
-            open_time=int(utc_now_ms() // 1000),
-            ml_conf=ml_prob,
-            dl_conf=dl_align,
-            spread_pts=spread_pts,
-            version_id=PAPER_VERSION,
-            volume=risk_dec.volume,
-        )
-        await self._save_paper()
+        opened = False
+        for name, book in self.paper_books.items():
+            if sym in book.positions:
+                continue
+            book.positions[sym] = ShadowPosition(
+                symbol=sym,
+                strategy_id=sig.strategy_id,
+                regime=assess.regime,
+                side=sig.side,
+                entry_price=round(entry, spec.digits),
+                sl=sl,
+                tp=tp,
+                risk_dist=max(abs(entry - sl), spec.point),
+                open_time=int(utc_now_ms() // 1000),
+                ml_conf=ml_prob,
+                dl_conf=dl_align,
+                spread_pts=spread_pts,
+                version_id=PAPER_BOOKS[name],
+                volume=risk_dec.volume,
+            )
+            opened = True
+        if opened:
+            await self._save_paper()
 
     def _paper_money(self, p: ShadowPosition, exit_px: float) -> float:
         spec = self.specs.get(p.symbol)
@@ -758,71 +789,115 @@ class TradingOrchestrator:
             return 0.0
         return round(move / spec.tick_size * spec.tick_value * p.volume, 2)
 
+    async def _rebuild_exit_selector(self) -> None:
+        """Re-learn the exit-style comparison from every closed paper trade in the journal."""
+        self.exit_selector = ExitStyleSelector(min_samples=self.config.exits.adaptive_min_samples)
+        for name, version in PAPER_BOOKS.items():
+            trades = await self.db.list_trades(limit=20000, version_id=version)
+            for t in sorted(trades, key=lambda t: t.close_time):
+                self.exit_selector.record(name, t.symbol, t.regime.value, t.pnl_r)
+
+    def _mt5_exit_style(self, symbol: str, regime: MarketRegime) -> str:
+        if not self.config.exits.adaptive:
+            return "normal"
+        return self.exit_selector.choose(symbol, regime.value).style
+
+    def _exit_policy(self, book: str) -> ProfitLock | HitRun:
+        if book == "hitrun":
+            h = self.config.paper.hit_run
+            return HitRun(take_r=h.take_r, min_spread_mult=h.min_spread_mult, trail_dist_r=h.trail_dist_r, be_offset_r=h.be_offset_r)
+        e = self.config.exits
+        return ProfitLock(be_at_r=e.be_at_r, be_offset_r=e.be_offset_r, trail_start_r=e.trail_start_r, trail_dist_r=e.trail_dist_r)
+
     async def _update_paper_positions_on_tick(self, tk: TickSnapshot, now_sec: int) -> None:
-        p = self.paper_positions.get(tk.symbol)
-        if p is None:
-            return
-        px = tk.bid if p.side == Side.BUY else tk.ask
-        cur_r = ((px - p.entry_price) if p.side == Side.BUY else (p.entry_price - px)) / max(p.risk_dist, 1e-12)
-        p.mae_r = min(p.mae_r, cur_r)
-        p.mfe_r = max(p.mfe_r, cur_r)
-        hit_sl = p.sl > 0 and ((p.side == Side.BUY and px <= p.sl) or (p.side == Side.SELL and px >= p.sl))
-        hit_tp = p.tp > 0 and ((p.side == Side.BUY and px >= p.tp) or (p.side == Side.SELL and px <= p.tp))
-        timed_out = now_sec - p.open_time >= PAPER_MAX_HOLD_SEC
-        if not (hit_sl or hit_tp or timed_out):
-            return
-        self.paper_positions.pop(tk.symbol, None)
-        pnl = self._paper_money(p, px)
-        self.paper_equity = round(self.paper_equity + pnl, 2)
-        reason = "TP" if hit_tp else ("SL" if hit_sl else "TIME_EXPIRY")
-        await self.db.save_trade(
-            TradeRecord(
-                is_shadow=False,
-                version_id=PAPER_VERSION,
-                symbol=p.symbol,
-                strategy_id=p.strategy_id,
-                regime=p.regime,
-                side=p.side,
-                volume=p.volume,
-                entry_price=p.entry_price,
-                exit_price=px,
-                sl_price=p.sl,
-                tp_price=p.tp,
-                open_time=p.open_time,
-                close_time=now_sec,
-                pnl_money=pnl,
-                pnl_r=round(cur_r, 4),
-                mae_r=round(p.mae_r, 4),
-                mfe_r=round(p.mfe_r, 4),
-                spread_at_entry=p.spread_pts,
-                ml_confidence=p.ml_conf,
-                dl_confidence=p.dl_conf,
-                exit_reason=reason,
+        changed = False
+        for name, book in self.paper_books.items():
+            p = book.positions.get(tk.symbol)
+            if p is None:
+                continue
+            px = tk.bid if p.side == Side.BUY else tk.ask
+            cur_r = ((px - p.entry_price) if p.side == Side.BUY else (p.entry_price - px)) / max(p.risk_dist, 1e-12)
+            p.mae_r = min(p.mae_r, cur_r)
+            p.mfe_r = max(p.mfe_r, cur_r)
+            spec = self.specs.get(p.symbol)
+            spread_px = (tk.ask - tk.bid) if tk.ask > tk.bid else (tk.spread_points * (spec.point if spec else 0.0))
+            action, new_sl = evaluate(
+                self._exit_policy(name), side=p.side, entry=p.entry_price, risk=p.risk_dist,
+                price=px, peak_r=p.mfe_r, sl=p.sl, spread_px=spread_px,
             )
-        )
-        await self._save_paper()
-        await self._log_decision(
-            DecisionEvent(
-                symbol=p.symbol,
-                category="EXEC",
-                tag=f"PAPER {reason}",
-                strategy_id=p.strategy_id,
-                side=p.side.value,
-                message=f"Paper {p.side.value} {p.volume} lot closed @ {px} ({cur_r:+.2f}R, ${pnl:+.2f}). Paper equity ${self.paper_equity:,.2f}",
+            if action == "MOVE_SL":
+                p.sl = round(new_sl, spec.digits if spec else 5)
+                changed = True
+            hit_sl = p.sl > 0 and ((p.side == Side.BUY and px <= p.sl) or (p.side == Side.SELL and px >= p.sl))
+            hit_tp = p.tp > 0 and ((p.side == Side.BUY and px >= p.tp) or (p.side == Side.SELL and px <= p.tp))
+            timed_out = now_sec - p.open_time >= self.config.paper.max_hold_min * 60
+            if not (action == "CLOSE" or hit_sl or hit_tp or timed_out):
+                continue
+            book.positions.pop(tk.symbol, None)
+            changed = True
+            pnl = self._paper_money(p, px)
+            book.equity = round(book.equity + pnl, 2)
+            self.exit_selector.record(name, p.symbol, p.regime.value, round(cur_r, 4))
+            in_profit_stop = hit_sl and cur_r > 0
+            reason = (
+                "TP" if hit_tp else "TAKE" if action == "CLOSE" else "LOCK" if in_profit_stop
+                else "SL" if hit_sl else "TIME_EXPIRY"
             )
-        )
+            await self.db.save_trade(
+                TradeRecord(
+                    is_shadow=False,
+                    version_id=PAPER_BOOKS[name],
+                    symbol=p.symbol,
+                    strategy_id=p.strategy_id,
+                    regime=p.regime,
+                    side=p.side,
+                    volume=p.volume,
+                    entry_price=p.entry_price,
+                    exit_price=px,
+                    sl_price=p.sl,
+                    tp_price=p.tp,
+                    open_time=p.open_time,
+                    close_time=now_sec,
+                    pnl_money=pnl,
+                    pnl_r=round(cur_r, 4),
+                    mae_r=round(p.mae_r, 4),
+                    mfe_r=round(p.mfe_r, 4),
+                    spread_at_entry=p.spread_pts,
+                    ml_confidence=p.ml_conf,
+                    dl_confidence=p.dl_conf,
+                    exit_reason=reason,
+                )
+            )
+            await self._log_decision(
+                DecisionEvent(
+                    symbol=p.symbol,
+                    category="EXEC",
+                    tag=f"{PAPER_LABELS[name].upper()} {reason}",
+                    strategy_id=p.strategy_id,
+                    side=p.side.value,
+                    message=f"Paper {PAPER_LABELS[name]} {p.side.value} {p.volume} lot closed @ {px} ({cur_r:+.2f}R, ${pnl:+.2f}). Equity ${book.equity:,.2f}",
+                )
+            )
+        if changed:
+            await self._save_paper()
 
     def paper_snapshot(self) -> dict[str, Any]:
-        out = []
-        for p in self.paper_positions.values():
-            tk = self.ticks.get(p.symbol)
-            px = (tk.bid if p.side == Side.BUY else tk.ask) if tk else p.entry_price
-            out.append({
-                "symbol": p.symbol, "side": p.side.value, "volume": p.volume, "entry_price": p.entry_price,
-                "current_price": px, "sl": p.sl, "tp": p.tp, "strategy_id": p.strategy_id,
-                "profit": self._paper_money(p, px), "open_time": p.open_time,
-            })
-        return {"equity": self.paper_equity, "positions": out}
+        books = {}
+        for name, book in self.paper_books.items():
+            out = []
+            for p in book.positions.values():
+                tk = self.ticks.get(p.symbol)
+                px = (tk.bid if p.side == Side.BUY else tk.ask) if tk else p.entry_price
+                out.append({
+                    "book": name, "label": PAPER_LABELS[name],
+                    "symbol": p.symbol, "side": p.side.value, "volume": p.volume, "entry_price": p.entry_price,
+                    "current_price": px, "sl": p.sl, "tp": p.tp, "strategy_id": p.strategy_id,
+                    "profit": self._paper_money(p, px), "open_time": p.open_time,
+                })
+            books[name] = {"label": PAPER_LABELS[name], "equity": book.equity, "positions": out}
+        normal = books["normal"]
+        # "equity"/"positions" keep the earlier shape (Normal book) for older dashboard code.
+        return {"equity": normal["equity"], "positions": [p for b in books.values() for p in b["positions"]], "books": books}
 
     async def _manage_open_positions_with_rl_exit(self, now_ms: int) -> None:
         for pos in self.open_positions:
@@ -835,6 +910,68 @@ class TradingOrchestrator:
                 if meta.side == Side.BUY
                 else (meta.entry_price - pos.current_price) / meta.initial_risk_price
             )
+            # Profit lock first: BE at +be_at_r, trail from +trail_start_r. Independent of the RL
+            # agent, which only moved to BE at +0.8R and let +0.5R trades fall back to a full loss.
+            tk = self.ticks.get(pos.symbol)
+            spread_px = (tk.ask - tk.bid) if tk and tk.ask > tk.bid else 0.0
+            style = self._mt5_exit_style(pos.symbol, meta.regime)
+            lock_action, lock_sl = evaluate(
+                self._exit_policy(style), side=meta.side, entry=meta.entry_price, risk=meta.initial_risk_price,
+                price=pos.current_price, peak_r=meta.mfe_r, sl=pos.sl, spread_px=spread_px,
+            )
+            if lock_action == "CLOSE":
+                if meta.rl_trace[-1] != "HIT_RUN_TAKE":
+                    meta.rl_trace.append("HIT_RUN_TAKE")
+                    self.order_sm.enqueue(
+                        OrderCommand(
+                            action=OrderAction.CLOSE,
+                            symbol=pos.symbol,
+                            broker_symbol=spec.broker_symbol,
+                            ticket=pos.ticket,
+                            expires_at_ms=now_ms + 3000,
+                        )
+                    )
+                    await self._log_decision(
+                        DecisionEvent(
+                            symbol=pos.symbol, category="EXEC", tag="HIT & RUN TAKE", strategy_id=meta.strategy_id,
+                            message=f"#{pos.ticket} closed at +{cur_r:.2f}R (Hit & Run dipilih untuk {pos.symbol} {meta.regime.value})",
+                        )
+                    )
+                continue
+            if lock_action == "MOVE_SL":
+                lock_sl = round(lock_sl, spec.digits)
+                ref = meta.last_sl_request or pos.sl
+                moved_enough = ref <= 0 or abs(lock_sl - ref) >= spec.point * 5
+                better_than_ref = ref <= 0 or ((lock_sl > ref) if meta.side == Side.BUY else (lock_sl < ref))
+                if moved_enough and better_than_ref:
+                    first = not meta.already_at_be
+                    meta.already_at_be = True
+                    meta.last_sl_request = lock_sl
+                    if meta.rl_trace[-1] != "PROFIT_LOCK":
+                        meta.rl_trace.append("PROFIT_LOCK")
+                    self.order_sm.enqueue(
+                        OrderCommand(
+                            action=OrderAction.MODIFY,
+                            symbol=pos.symbol,
+                            broker_symbol=spec.broker_symbol,
+                            ticket=pos.ticket,
+                            sl=lock_sl,
+                            tp=pos.tp,
+                            expires_at_ms=now_ms + 3000,
+                        )
+                    )
+                    if first:
+                        await self._log_decision(
+                            DecisionEvent(
+                                symbol=pos.symbol,
+                                category="EXEC",
+                                tag="PROFIT LOCK" if style == "normal" else "HIT & RUN LOCK",
+                                strategy_id=meta.strategy_id,
+                                message=f"#{pos.ticket} reached +{meta.mfe_r:.2f}R: SL moved to {lock_sl} (breakeven + costs)",
+                            )
+                        )
+                    continue
+
             dl = self.dl_preds.get(pos.symbol, DLPrediction())
             dl_aligned = (dl.prob_up >= dl.prob_down) if meta.side == Side.BUY else (dl.prob_down >= dl.prob_up)
 
