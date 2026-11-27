@@ -66,6 +66,12 @@ class ExitSetupRequest(BaseModel):
     trail_start_r: float | None = Field(default=None, ge=0.2, le=5.0)
     trail_dist_r: float | None = Field(default=None, ge=0.05, le=3.0)
     hit_min_net_profit: float | None = Field(default=None, ge=0.0, le=100.0)
+    hit_own_stop: bool | None = None
+    hit_max_loss_mult: float | None = Field(default=None, ge=1.0, le=20.0)
+    hit_sl_atr_mult: float | None = Field(default=None, ge=0.2, le=5.0)
+    hit_sl_min_spread_mult: float | None = Field(default=None, ge=0.0, le=20.0)
+    hit_time_stop_bars: int | None = Field(default=None, ge=0, le=120)
+    hit_adaptive: bool | None = None
     adaptive: bool | None = None
 
 
@@ -152,7 +158,8 @@ def register_setup_routes(api: APIRouter, orch: TradingOrchestrator, env_path: s
 
     @api.get("/setup")
     async def get_setup() -> dict[str, Any]:
-        return {"llm": llm_view(), "supervisor": supervisor_view(), "mt5": mt5_view(), "safety": safety_view(), "costs": costs_view()}
+        return {"llm": llm_view(), "supervisor": supervisor_view(), "mt5": mt5_view(), "safety": safety_view(), "costs": costs_view(),
+                "hit_run": orch.config.paper.hit_run.model_dump()}
 
     @api.put("/setup/costs")
     async def put_costs(req: CostSetupRequest) -> dict[str, Any]:
@@ -245,8 +252,8 @@ def register_setup_routes(api: APIRouter, orch: TradingOrchestrator, env_path: s
             if v is not None
         })
         hr = orch.config.paper.hit_run.model_copy(update={
-            k: v for k, v in {"min_net_profit": req.hit_min_net_profit}.items()
-            if v is not None
+            k[4:]: v for k, v in req.model_dump().items()
+            if k.startswith("hit_") and v is not None
         })
         orch.config.exits = ex
         orch.config.paper = orch.config.paper.model_copy(update={"hit_run": hr})

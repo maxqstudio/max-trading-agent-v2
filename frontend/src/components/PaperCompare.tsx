@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Brain, Scale } from 'lucide-react';
 import { api } from '../api/client';
-import { humanText } from '../labels';
+import { human } from '../labels';
 
 // Normal vs Hit & Run on the same setups, plus the real MT5 account, and what the
 // exit-style learner has concluded so far per pair/regime.
@@ -20,6 +20,7 @@ interface Row {
   avg_r: number;
   max_dd_pct: number;
   losers_after_half_r: number;
+  breakeven_win_rate: number | null;
 }
 
 interface Group {
@@ -40,6 +41,12 @@ interface Compare {
   note: string;
   learning: { adaptive: boolean; min_samples: number; groups: Group[] };
   veto?: { verdict: string; trades: number; win_rate: number; avg_r: number; net_pnl: number }[];
+  hitrun_learning?: {
+    adaptive: boolean;
+    min_samples: number;
+    default: string;
+    groups: { key: string; trades: number; best: string; best_avg: number; best_wr: number; default_avg: number | null; using: string | null }[];
+  };
 }
 
 const COLOR: Record<string, string> = { normal: '#F59E0B', hitrun: '#EC4899', raw: '#14B8A6', mt5: '#3B82F6' };
@@ -49,6 +56,7 @@ const VERDICT: Record<string, string> = {
   REJECT: 'Rejected by Claude',
   NONE: 'Not reviewed',
 };
+const groupLabel = (k: string) => k.split(' · ').map((part) => human(part)).join(' · ');
 const money = (v: number) => `${v >= 0 ? '+' : '-'}$${Math.abs(v).toFixed(2)}`;
 const signed = (v: number, d = 2) => `${v >= 0 ? '+' : ''}${v.toFixed(d)}`;
 
@@ -110,6 +118,9 @@ export const PaperCompare: React.FC = () => {
               <th className="py-1.5 px-2 text-right">Equity</th>
               <th className="py-1.5 px-2 text-right">Trade</th>
               <th className="py-1.5 px-2 text-right">Win rate</th>
+              <th className="py-1.5 px-2 text-right" title="Win rate needed to break even with these average win and loss sizes">
+                Break-even WR
+              </th>
               <th className="py-1.5 px-2 text-right">PF</th>
               <th className="py-1.5 px-2 text-right">Net</th>
               <th className="py-1.5 px-2 text-right">Avg win / loss</th>
@@ -131,6 +142,13 @@ export const PaperCompare: React.FC = () => {
                 <td className="py-1.5 px-2 text-right">${r.equity.toFixed(0)}</td>
                 <td className="py-1.5 px-2 text-right">{r.trades}</td>
                 <td className="py-1.5 px-2 text-right">{r.trades ? `${r.win_rate.toFixed(1)}%` : '—'}</td>
+                <td
+                  className={`py-1.5 px-2 text-right ${
+                    r.breakeven_win_rate == null ? '' : r.win_rate >= r.breakeven_win_rate ? 'text-[#10B981]' : 'text-[#EF4444]'
+                  }`}
+                >
+                  {r.breakeven_win_rate == null ? '—' : `${r.breakeven_win_rate.toFixed(1)}%`}
+                </td>
                 <td className="py-1.5 px-2 text-right">{r.profit_factor == null ? '—' : r.profit_factor.toFixed(2)}</td>
                 <td className={`py-1.5 px-2 text-right font-bold ${r.net_pnl >= 0 ? 'text-[#10B981]' : 'text-[#EF4444]'}`}>{money(r.net_pnl)}</td>
                 <td className="py-1.5 px-2 text-right">{r.trades ? `${money(r.avg_win)} / ${money(r.avg_loss)}` : '—'}</td>
@@ -141,7 +159,7 @@ export const PaperCompare: React.FC = () => {
             ))}
             {!data && !err ? (
               <tr>
-                <td colSpan={10} className="py-4 text-center text-[#8A9BB5] font-sans">
+                <td colSpan={11} className="py-4 text-center text-[#8A9BB5] font-sans">
                   Loading...
                 </td>
               </tr>
@@ -230,7 +248,7 @@ export const PaperCompare: React.FC = () => {
               <tbody className="divide-y divide-[#1F2D45] mono">
                 {groups.map((g) => (
                   <tr key={g.key}>
-                    <td className="py-1 px-2 font-bold">{humanText(g.key)}</td>
+                    <td className="py-1 px-2 font-bold">{groupLabel(g.key)}</td>
                     <td className="py-1 px-2 text-right">
                       {g.normal_n} · {signed(g.normal_avg_r)} · {g.normal_wr.toFixed(0)}%
                     </td>
@@ -250,6 +268,50 @@ export const PaperCompare: React.FC = () => {
         )}
       </div>
 
+      {data?.hitrun_learning ? (
+        <div className="px-3 py-2 border-t border-[#1F2D45] text-xs space-y-2">
+          <div className="font-bold flex items-center gap-1.5">
+            <Brain className="w-3.5 h-3.5 text-[#EC4899]" /> Hit &amp; Run stop learning
+          </div>
+          <p className="text-[#8A9BB5]">
+            Every setup in the No Veto book is followed by ghost trades with different stop distances and time stops, all with the same
+            money cap. Default: {data.hitrun_learning.default}. A different setting is used only after {data.hitrun_learning.min_samples}{' '}
+            ghost trades each and a clear edge{data.hitrun_learning.adaptive ? '' : ' (learning is off in Setup)'}.
+          </p>
+          {data.hitrun_learning.groups.length ? (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="border-b border-[#1F2D45] text-[#8A9BB5]">
+                    <th className="py-1 px-2">Market · regime</th>
+                    <th className="py-1 px-2 text-right">Ghost trades</th>
+                    <th className="py-1 px-2">Best so far</th>
+                    <th className="py-1 px-2 text-right">Best $/trade · WR</th>
+                    <th className="py-1 px-2 text-right">Default $/trade</th>
+                    <th className="py-1 px-2 text-right">In use</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#1F2D45] mono">
+                  {data.hitrun_learning.groups.map((g) => (
+                    <tr key={g.key}>
+                      <td className="py-1 px-2 font-bold">{groupLabel(g.key)}</td>
+                      <td className="py-1 px-2 text-right">{g.trades}</td>
+                      <td className="py-1 px-2 font-sans">{g.best}</td>
+                      <td className="py-1 px-2 text-right">
+                        {money(g.best_avg)} · {g.best_wr.toFixed(0)}%
+                      </td>
+                      <td className="py-1 px-2 text-right">{g.default_avg == null ? '—' : money(g.default_avg)}</td>
+                      <td className="py-1 px-2 text-right font-sans">{g.using ?? '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="text-[#8A9BB5]">No ghost trades finished yet.</p>
+          )}
+        </div>
+      ) : null}
     </div>
   );
 };

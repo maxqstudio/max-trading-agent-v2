@@ -28,11 +28,13 @@ const LABELS: Record<string, string> = {
   EXIT_NOW: 'Exit now',
   PROFIT_LOCK: 'Profit lock',
   HIT_RUN_TAKE: 'Hit & Run take',
+  HIT_RUN_TIME_STOP: 'Hit & Run time stop',
   // exit reasons
   TP: 'Take profit',
   SL: 'Stop loss',
   TRAIL_BE: 'Trailing / BE',
   TIME_EXPIRY: 'Time expired',
+  TIME_STOP: 'Time stop',
   TAKE: 'Take profit (net)',
   LOCK: 'Profit locked',
   // gates and risk codes

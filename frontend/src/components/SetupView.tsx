@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { ArrowDown, ArrowUp, Check, Loader2, Plus, RefreshCw, Trash2, X } from 'lucide-react';
 import { api } from '../api/client';
 import { BrokerCostsCard } from './BrokerCostsCard';
+import { HitRunCard } from './HitRunCard';
 import { human } from '../labels';
 import { LOGO_FULL_URL } from './BullishLogo';
 
@@ -398,6 +399,9 @@ export const SetupView: React.FC<{ onToast: (msg: string) => void }> = ({ onToas
           </div>
           {setup.costs && (
             <BrokerCostsCard costs={setup.costs} onSaved={(c) => setSetup({ ...setup, costs: c })} onToast={onToast} />
+          )}
+          {setup.hit_run && (
+            <HitRunCard settings={setup.hit_run} onSaved={(h) => setSetup({ ...setup, hit_run: h })} onToast={onToast} />
           )}
           <div className="cockpit-card rounded-lg p-3.5 space-y-2">
             <h3 className="font-bold uppercase tracking-wider">Safety</h3>

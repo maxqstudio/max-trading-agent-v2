@@ -62,7 +62,7 @@ def test_two_books_same_setup_different_exits(tmp_path: Path):
             await orch.initialize_from_storage()
             orch.ticks["XAUUSD"] = tk(2650.0)
             await orch._open_paper_position(
-                "XAUUSD", SimpleNamespace(side=Side.BUY, strategy_id="s"),
+                "XAUUSD", SimpleNamespace(side=Side.BUY, strategy_id="s", atr=1.0),
                 SimpleNamespace(volume=0.1, adjusted_sl=2645.1, adjusted_tp=2660.1),
                 SimpleNamespace(regime=MarketRegime.RANGING), orch.specs["XAUUSD"], 0.6, 0.6, 10.0,
             )

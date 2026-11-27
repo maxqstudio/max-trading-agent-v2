@@ -23,6 +23,8 @@ def summarize(trades: list[TradeRecord], start_equity: float) -> dict[str, Any]:
         peak = max(peak, eq)
         max_dd = max(max_dd, (peak - eq) / peak * 100.0 if peak > 0 else 0.0)
     n = len(trades)
+    avg_win = gross_win / len(wins) if wins else 0.0
+    avg_loss = gross_loss / len(losses) if losses else 0.0
     return {
         "trades": n,
         "win_rate": round(len(wins) / n * 100.0, 1) if n else 0.0,
@@ -33,6 +35,8 @@ def summarize(trades: list[TradeRecord], start_equity: float) -> dict[str, Any]:
         "avg_r": round(sum(t.pnl_r for t in trades) / n, 3) if n else 0.0,
         "max_dd_pct": round(max_dd, 2),
         "losers_after_half_r": sum(1 for t in trades if t.pnl_money <= 0 and t.mfe_r >= 0.5),
+        # Win rate needed to break even with these average win and loss sizes.
+        "breakeven_win_rate": round(avg_loss / (avg_win + avg_loss) * 100.0, 1) if avg_win > 0 and avg_loss > 0 else None,
     }
 
 
@@ -70,5 +74,6 @@ def register_paper_routes(api: APIRouter, orch: TradingOrchestrator) -> None:
                 "groups": orch.exit_selector.table(),
             },
             "veto": orch.veto_scoreboard(),
+            "hitrun_learning": orch.hitrun_learning(),
             "settings": {"exits": orch.config.exits.model_dump(), "hit_run": orch.config.paper.hit_run.model_dump()},
         }

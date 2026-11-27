@@ -130,6 +130,15 @@ class HitRunConfig(BaseModel):
     # Close as soon as the net profit (after spread, commission, swap) is at least this much
     # money per trade. $1 also leaves room for slippage on the close.
     min_net_profit: float = 1.0
+    # Its own stop loss, tighter than Normal's (see backend/engine/hitrun_stop.py).
+    own_stop: bool = True
+    max_loss_mult: float = 4.0  # max loss per trade = this x min_net_profit, commission included
+    sl_atr_mult: float = 1.2  # SL distance = this x ATR(M1)...
+    sl_min_spread_mult: float = 3.0  # ...but never closer than this x spread
+    time_stop_bars: int = 4  # close if not in net profit after this many M1 bars (0 = off)
+    # Learn the best SL multiple and time stop per symbol+regime from ghost trades on paper.
+    adaptive: bool = True
+    adaptive_min_samples: int = 30
 
 
 class PaperConfig(BaseModel):

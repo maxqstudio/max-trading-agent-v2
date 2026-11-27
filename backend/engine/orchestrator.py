@@ -35,6 +35,7 @@ from backend.evolution.llm_reflector import LLMReflectionAnalyst
 from backend.llm.router import LLMRouter
 from backend.engine.exit_policy import NetTake, ProfitLock, evaluate, net_take
 from backend.engine.exit_selector import ExitStyleSelector
+from backend.engine.hitrun_stop import Ghost, HitRunArm, HitRunPlan, HitRunTuner, plan_stop, time_stop_due
 from backend.engine.supervisor import SupervisorSettings, TradeSupervisor, build_context, price_drifted, scale_volume
 from backend.evolution.meta_labeler import CalibratedMetaLabeler
 from backend.evolution.optimizer import PurgedWalkForwardOptimizer
@@ -67,6 +68,7 @@ class ShadowPosition:
     version_id: str = "shadow"
     volume: float = 0.10
     veto: str = ""  # No Veto book: what the supervisor said about this setup (evaluation only)
+    time_stop_bars: int = 0  # Hit & Run book: close if not in net profit after this many M1 bars
 
 
 PAPER_VERSION = "PAPER"  # Normal book (kept for journal compatibility)
@@ -188,6 +190,7 @@ class TradingOrchestrator:
         # Paper books run side by side on the same approved setups, in every mode:
         # "normal" = existing exits + profit lock, "hitrun" = take profit fast.
         self.exit_selector = ExitStyleSelector(min_samples=config.exits.adaptive_min_samples)
+        self.hitrun_tuner = HitRunTuner(min_samples=config.paper.hit_run.adaptive_min_samples)
         self.veto_stats: dict[str, dict[str, float]] = {}
         self.learned_costs: dict[str, dict[str, float]] = {}  # per symbol, from closed MT5 trades
         self.paper_books: dict[str, PaperBook] = {
@@ -255,6 +258,7 @@ class TradingOrchestrator:
                     book.positions[p.symbol] = p
         await self._rebuild_exit_selector()
         self.veto_stats = await self.db.get_kv("veto_stats") or {}
+        self.hitrun_tuner.load(await self.db.get_kv("hitrun_tuner"))
         await self._learn_broker_costs()
         self.order_sm.import_tracking(await self.db.get_kv("mt5_tracking"))
         self._tracking_sig = tuple(sorted(self.order_sm.active_positions))
@@ -717,6 +721,21 @@ class TradingOrchestrator:
             )
             return
 
+        # Exit style is fixed at entry: a Hit & Run position gets its own SL and lot from the start.
+        volume, sl, ts_bars = risk_dec.volume, risk_dec.adjusted_sl, 0
+        style = self._mt5_exit_style(sym, assess.regime)
+        if style == "hitrun" and self.config.paper.hit_run.own_stop:
+            px = tick.ask if (tick and best_sig.side == Side.BUY) else (tick.bid if tick else best_sig.entry_price)
+            spread_px = max(tick.ask - tick.bid, 0.0) if tick else spread_pts * spec.point
+            plan = self._hitrun_plan(sym, best_sig.side, px, best_sig.atr, spread_px, spec, sl, volume,
+                                     self._hitrun_arm(sym, assess.regime))
+            if plan is None:
+                style = "normal"
+                note += " | Hit & Run cap not reachable with the minimum lot: Normal exit"
+            else:
+                volume, sl, ts_bars = plan.volume, plan.sl, plan.arm.time_stop_bars
+                note += f" | Hit & Run: SL {plan.sl}, max loss ${plan.max_loss:.2f}, {plan.arm.label()}"
+
         # Dispatch idempotent OrderCommand to MT5 EA
         now_ms = utc_now_ms()
         cmd = OrderCommand(
@@ -724,8 +743,8 @@ class TradingOrchestrator:
             symbol=sym,
             broker_symbol=spec.broker_symbol,
             side=best_sig.side,
-            volume=risk_dec.volume,
-            sl=risk_dec.adjusted_sl,
+            volume=volume,
+            sl=sl,
             tp=risk_dec.adjusted_tp,
             magic=self.config.instruments.magic_number,
             strategy_id=best_sig.strategy_id,
@@ -741,10 +760,12 @@ class TradingOrchestrator:
             dl_confidence=dl_align,
             bandit_weight=b_weight,
             spread_at_entry=spread_pts,
+            exit_style=style,
+            time_stop_bars=ts_bars,
         )
         if queued:
             self.active_thought = (
-                f"FIRING {sym} {best_sig.side.value} {risk_dec.volume} lot via {best_sig.strategy_id} "
+                f"FIRING {sym} {best_sig.side.value} {volume} lot via {best_sig.strategy_id} "
                 f"(ML {ml_prob:.0%}, DL {dl_align:.0%}, Bandit {b_weight:.0%})"
             )
             await self._log_decision(
@@ -754,7 +775,7 @@ class TradingOrchestrator:
                     tag="ORDER SENT",
                     strategy_id=best_sig.strategy_id,
                     side=best_sig.side.value,
-                    message=f"{best_sig.side.value} {risk_dec.volume} lot | ML {ml_prob:.0%} • DL {dl_align:.0%} • {best_sig.reason}{note}",
+                    message=f"{best_sig.side.value} {volume} lot | ML {ml_prob:.0%} • DL {dl_align:.0%} • {best_sig.reason}{note}",
                     latency_ms=lat_ms,
                 )
             )
@@ -788,29 +809,46 @@ class TradingOrchestrator:
         slip = self.paper_costs(sym)["slippage_points"] * spec.point
         entry = (tick.ask + slip) if sig.side == Side.BUY else (tick.bid - slip)
         sl, tp = risk_dec.adjusted_sl, risk_dec.adjusted_tp
+        spread_px = max(tick.ask - tick.bid, 0.0)
+        h = self.config.paper.hit_run
         opened = False
         for name in books:
             book = self.paper_books[name]
             if sym in book.positions:
                 continue
+            p_sl, p_vol, p_risk, p_ts = sl, risk_dec.volume, max(abs(entry - sl), spec.point), 0
+            if name == "hitrun" and h.own_stop:
+                plan = self._hitrun_plan(sym, sig.side, entry, sig.atr, spread_px, spec, sl, risk_dec.volume,
+                                         self._hitrun_arm(sym, assess.regime))
+                if plan is None:
+                    continue  # even the minimum lot would lose more than the Hit & Run cap
+                p_sl, p_vol, p_risk, p_ts = plan.sl, plan.volume, plan.risk_dist, plan.arm.time_stop_bars
             book.positions[sym] = ShadowPosition(
                 symbol=sym,
                 strategy_id=sig.strategy_id,
                 regime=assess.regime,
                 side=sig.side,
                 entry_price=round(entry, spec.digits),
-                sl=sl,
+                sl=p_sl,
                 tp=tp,
-                risk_dist=max(abs(entry - sl), spec.point),
+                risk_dist=p_risk,
                 open_time=int(utc_now_ms() // 1000),
                 ml_conf=ml_prob,
                 dl_conf=dl_align,
                 spread_pts=spread_pts,
                 version_id=PAPER_BOOKS[name],
-                volume=risk_dec.volume,
+                volume=p_vol,
                 veto=veto if name == "raw" else "",
+                time_stop_bars=p_ts,
             )
             opened = True
+        if "raw" in books and h.own_stop and h.adaptive:
+            # Ghost trades for every Hit & Run stop setting, on every risk-approved setup.
+            plans = [
+                pl for arm in self.hitrun_tuner.arms(self._hitrun_default_arm())
+                if (pl := self._hitrun_plan(sym, sig.side, entry, sig.atr, spread_px, spec, sl, risk_dec.volume, arm))
+            ]
+            self.hitrun_tuner.spawn(sym, assess.regime.value, sig.side, entry, int(utc_now_ms() // 1000), plans)
         if opened:
             await self._save_paper()
 
@@ -890,6 +928,50 @@ class TradingOrchestrator:
         slip = self.paper_costs(p.symbol)["slippage_points"] * (spec.point if spec else 0.0)
         return px - slip if p.side == Side.BUY else px + slip
 
+    def _hitrun_default_arm(self) -> HitRunArm:
+        h = self.config.paper.hit_run
+        return HitRunArm(h.sl_atr_mult, h.time_stop_bars)
+
+    def _hitrun_arm(self, symbol: str, regime: MarketRegime) -> HitRunArm:
+        h = self.config.paper.hit_run
+        default = self._hitrun_default_arm()
+        if not h.adaptive:
+            return default
+        self.hitrun_tuner.min_samples = h.adaptive_min_samples
+        return self.hitrun_tuner.choose(symbol, regime.value, default).arm
+
+    def _hitrun_plan(
+        self, sym: str, side: Side, entry: float, atr: float, spread_px: float, spec: SymbolSpec,
+        normal_sl: float, normal_volume: float, arm: HitRunArm,
+    ) -> HitRunPlan | None:
+        h = self.config.paper.hit_run
+        return plan_stop(
+            side=side, entry=entry, atr=atr, spread_px=spread_px, spec=spec, normal_sl=normal_sl,
+            normal_volume=normal_volume, commission_per_lot=self.paper_costs(sym)["commission_per_lot"],
+            min_net_profit=h.min_net_profit, max_loss_mult=h.max_loss_mult,
+            sl_min_spread_mult=h.sl_min_spread_mult, arm=arm,
+        )
+
+    def _ghost_net(self, g: Ghost, px: float) -> float:
+        spec = self.specs.get(g.symbol)
+        if spec is None or spec.tick_size <= 0:
+            return 0.0
+        costs = self.paper_costs(g.symbol)
+        slip = costs["slippage_points"] * spec.point
+        exit_px = px - slip if g.side == Side.BUY else px + slip
+        move = (exit_px - g.entry) if g.side == Side.BUY else (g.entry - exit_px)
+        return round(move / spec.tick_size * spec.tick_value * g.volume - costs["commission_per_lot"] * g.volume, 2)
+
+    def hitrun_learning(self) -> dict[str, Any]:
+        h = self.config.paper.hit_run
+        default = self._hitrun_default_arm()
+        return {
+            "adaptive": h.adaptive,
+            "min_samples": h.adaptive_min_samples,
+            "default": default.label(),
+            "groups": self.hitrun_tuner.table(default),
+        }
+
     def _net_take(self, symbol: str) -> NetTake:
         h = self.config.paper.hit_run
         return NetTake(min_net_profit=h.min_net_profit, commission_per_lot=self.paper_costs(symbol)["commission_per_lot"])
@@ -900,6 +982,10 @@ class TradingOrchestrator:
 
     async def _update_paper_positions_on_tick(self, tk: TickSnapshot, now_sec: int) -> None:
         changed = False
+        if self.hitrun_tuner.ghosts.get(tk.symbol) and self.hitrun_tuner.on_tick(
+            tk.symbol, tk.bid, tk.ask, now_sec, self.config.paper.hit_run.min_net_profit, self._ghost_net
+        ):
+            await self.db.set_kv("hitrun_tuner", self.hitrun_tuner.to_dict(), utc_now_ms())
 
         for name, book in self.paper_books.items():
             p = book.positions.get(tk.symbol)
@@ -911,10 +997,13 @@ class TradingOrchestrator:
             p.mfe_r = max(p.mfe_r, cur_r)
             spec = self.specs.get(p.symbol)
             spread_px = (tk.ask - tk.bid) if tk.ask > tk.bid else (tk.spread_points * (spec.point if spec else 0.0))
+            close_reason = ""
             if name == "hitrun":
                 # Hit & Run: take any net profit. Valued at bid/ask, so spread is already paid.
-                take, _net = net_take(self._net_take(p.symbol), gross_money=self._paper_money(p, self._paper_exit_px(p, px)), volume=p.volume)
+                take, net = net_take(self._net_take(p.symbol), gross_money=self._paper_money(p, self._paper_exit_px(p, px)), volume=p.volume)
                 action, new_sl = ("CLOSE" if take else "HOLD"), p.sl
+                if not take and time_stop_due(p.open_time, now_sec, p.time_stop_bars, net):
+                    action, close_reason = "CLOSE", "TIME_STOP"
             else:
                 action, new_sl = evaluate(
                     self._exit_policy(), side=p.side, entry=p.entry_price, risk=p.risk_dist,
@@ -938,7 +1027,7 @@ class TradingOrchestrator:
             if name == "raw":
                 await self._learn_from_unvetoed(p, round(cur_r, 4), pnl, now_sec)
             in_profit_stop = hit_sl and cur_r > 0
-            reason = (
+            reason = close_reason or (
                 "TP" if hit_tp else "TAKE" if action == "CLOSE" else "LOCK" if in_profit_stop
                 else "SL" if hit_sl else "TIME_EXPIRY"
             )
@@ -1052,7 +1141,8 @@ class TradingOrchestrator:
             # agent, which only moved to BE at +0.8R and let +0.5R trades fall back to a full loss.
             tk = self.ticks.get(pos.symbol)
             spread_px = (tk.ask - tk.bid) if tk and tk.ask > tk.bid else 0.0
-            style = self._mt5_exit_style(pos.symbol, meta.regime)
+            style = meta.exit_style or self._mt5_exit_style(pos.symbol, meta.regime)
+            close_tag = "HIT & RUN TAKE"
             if style == "hitrun":
                 # MT5 profit is valued at the closing price (spread included); add swap and the
                 # round-trip commission (MT5 reports the entry side, the exit side costs the same).
@@ -1061,14 +1151,17 @@ class TradingOrchestrator:
                     self._net_take(pos.symbol), gross_money=pos.profit, volume=pos.volume, swap=pos.swap, commission=comm
                 )
                 lock_action, lock_sl = ("CLOSE" if take else "HOLD"), pos.sl
+                if not take and meta.time_stop_bars and meta.bars_held >= meta.time_stop_bars and net <= 0:
+                    lock_action, close_tag = "CLOSE", "HIT & RUN TIME STOP"
             else:
                 lock_action, lock_sl = evaluate(
                     self._exit_policy(), side=meta.side, entry=meta.entry_price, risk=meta.initial_risk_price,
                     price=pos.current_price, peak_r=meta.mfe_r, sl=pos.sl, spread_px=spread_px,
                 )
             if lock_action == "CLOSE":
-                if meta.rl_trace[-1] != "HIT_RUN_TAKE":
-                    meta.rl_trace.append("HIT_RUN_TAKE")
+                trace = close_tag.replace(" & ", "_").replace(" ", "_")
+                if meta.rl_trace[-1] != trace:
+                    meta.rl_trace.append(trace)
                     self.order_sm.enqueue(
                         OrderCommand(
                             action=OrderAction.CLOSE,
@@ -1080,8 +1173,12 @@ class TradingOrchestrator:
                     )
                     await self._log_decision(
                         DecisionEvent(
-                            symbol=pos.symbol, category="EXEC", tag="HIT & RUN TAKE", strategy_id=meta.strategy_id,
-                            message=f"#{pos.ticket} closed at net profit ${net:.2f} ({cur_r:+.2f}R), Hit & Run chosen for {pos.symbol} {meta.regime.value}",
+                            symbol=pos.symbol, category="EXEC", tag=close_tag, strategy_id=meta.strategy_id,
+                            message=(
+                                f"#{pos.ticket} closed at net profit ${net:.2f} ({cur_r:+.2f}R), Hit & Run on {pos.symbol} {meta.regime.value}"
+                                if close_tag == "HIT & RUN TAKE" else
+                                f"#{pos.ticket} closed: not in net profit after {meta.bars_held} bars (${net:.2f}, {cur_r:+.2f}R)"
+                            ),
                         )
                     )
                 continue

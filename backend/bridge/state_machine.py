@@ -29,6 +29,8 @@ class PendingOrderRecord:
     bandit_weight: float = 0.25
     spread_at_entry: float = 0.0
     dispatched_at_ms: int = 0
+    exit_style: str = ""  # "normal" or "hitrun", decided at entry
+    time_stop_bars: int = 0  # Hit & Run time stop (M1 bars, 0 = off)
 
 
 @dataclass
@@ -59,6 +61,8 @@ class TrackedPositionMeta:
     last_sl_request: float = 0.0  # last SL we asked MT5 for (avoids re-sending every sync)
     last_rl_action: RLExitAction = RLExitAction.HOLD
     rl_trace: list[str] = field(default_factory=lambda: ["HOLD"])
+    exit_style: str = ""  # "" = opened before exit styles were fixed at entry
+    time_stop_bars: int = 0
 
 
 class IdempotentOrderStateMachine:
@@ -123,6 +127,8 @@ class IdempotentOrderStateMachine:
         dl_confidence: float = 0.5,
         bandit_weight: float = 0.25,
         spread_at_entry: float = 0.0,
+        exit_style: str = "",
+        time_stop_bars: int = 0,
     ) -> bool:
         """Idempotently enqueue an order command. Returns False if duplicate ID or inflight open exists."""
         if cmd.client_order_id in self._seen_ids:
@@ -147,6 +153,8 @@ class IdempotentOrderStateMachine:
             dl_confidence=dl_confidence,
             bandit_weight=bandit_weight,
             spread_at_entry=spread_at_entry,
+            exit_style=exit_style,
+            time_stop_bars=time_stop_bars,
         )
         self._queue.append(cmd)
         return True
@@ -210,6 +218,8 @@ class IdempotentOrderStateMachine:
                     spread_at_entry=rec.spread_at_entry,
                     slippage_points=ack.slippage_points,
                     commission=ack.commission,
+                    exit_style=rec.exit_style,
+                    time_stop_bars=rec.time_stop_bars,
                 )
             processed.append(ack)
         return processed
