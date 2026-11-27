@@ -164,6 +164,10 @@ class FiltersConfig(BaseModel):
     htf_timeframe: Literal["M15", "H1", "BOTH"] = "H1"
     session_mode: Literal["off", "on", "auto"] = "auto"
     blocked_sessions: list[str] = Field(default_factory=lambda: ["asia", "late"])  # used by "on"
+    # M15 Ichimoku checklist (price vs cloud, Tenkan vs Kijun, Chikou, price vs Kijun, future cloud):
+    # each +1 with the trade / -1 against; "against" = the sum is -ichimoku_threshold or lower.
+    ichimoku_mode: Literal["off", "on", "auto"] = "auto"
+    ichimoku_threshold: Literal[2, 3, 4] = 3
     min_samples: int = 30
 
 

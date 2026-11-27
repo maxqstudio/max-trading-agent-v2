@@ -1,4 +1,5 @@
-"""Entry filters on direction (M15/H1 bias) and trading session, and how well they would have worked.
+"""Entry filters on direction (M15/H1 bias), trading session and the M15 Ichimoku checklist, and
+how well they would have worked.
 
 Each filter has three modes:
 - "off":  never blocks;
@@ -17,9 +18,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from backend.features.htf import SESSIONS
+from backend.features.ichimoku import score_bucket
 
 HTF_BUCKETS = ("with", "neutral", "against")
 HTF_TIMEFRAMES = ("M15", "H1", "BOTH")
+ICHI_BUCKETS = ("with", "mixed", "against")
+ICHI_THRESHOLDS = (2, 3, 4)  # stats are kept for each, so changing the setting keeps its history
 
 
 def htf_bucket(m15: int, h1: int, timeframe: str) -> str:
@@ -46,7 +50,7 @@ class _Stat:
         self.total_sq += x * x
         self.wins += x > 0
 
-    def merge(self, o: "_Stat") -> "_Stat":
+    def merge(self, o: _Stat) -> _Stat:
         return _Stat(self.n + o.n, self.total + o.total, self.total_sq + o.total_sq, self.wins + o.wins)
 
     @property
@@ -66,11 +70,14 @@ class FilterLearner:
         self.z = z
         self.stats: dict[str, dict[str, _Stat]] = {}
 
-    def record(self, m15: int, h1: int, session: str, r: float) -> None:
+    def record(self, m15: int, h1: int, session: str, r: float, ichi: int | None = None) -> None:
         for tf in HTF_TIMEFRAMES:
             self._add(f"htf:{tf}", htf_bucket(m15, h1, tf), r)
         if session:
             self._add("session", session, r)
+        if ichi is not None:
+            for th in ICHI_THRESHOLDS:
+                self._add(f"ichi:{th}", score_bucket(ichi, th), r)
 
     def _add(self, key: str, bucket: str, r: float) -> None:
         self.stats.setdefault(key, {}).setdefault(bucket, _Stat()).add(r)
@@ -129,6 +136,9 @@ def decide(
     m15: int,
     h1: int,
     session: str,
+    ichimoku_mode: str = "off",
+    ichi: int = 0,
+    ichi_threshold: int = 3,
 ) -> FilterDecision:
     bucket = htf_bucket(m15, h1, htf_timeframe)
     if bucket == "against" and htf_mode != "off":
@@ -141,7 +151,14 @@ def decide(
             return FilterDecision("SESSION_FILTER", f"{session} session is blocked")
         if session_mode == "auto" and learner.clearly_worse("session", session):
             return FilterDecision("SESSION_FILTER", f"{session} session (learned: trades here do clearly worse)")
+    if ichimoku_mode != "off" and score_bucket(ichi, ichi_threshold) == "against":
+        if ichimoku_mode == "on":
+            return FilterDecision("ICHIMOKU_AGAINST", f"M15 Ichimoku checklist against the trade ({ichi:+d} of 5)")
+        if learner.clearly_worse(f"ichi:{ichi_threshold}", "against"):
+            return FilterDecision(
+                "ICHIMOKU_AGAINST", f"M15 Ichimoku checklist against the trade ({ichi:+d} of 5; learned: these trades do clearly worse)"
+            )
     return FilterDecision("")
 
 
-__all__ = ["FilterLearner", "FilterDecision", "decide", "htf_bucket", "HTF_BUCKETS", "HTF_TIMEFRAMES", "SESSIONS"]
+__all__ = ["HTF_BUCKETS", "HTF_TIMEFRAMES", "ICHI_BUCKETS", "SESSIONS", "FilterDecision", "FilterLearner", "decide", "htf_bucket"]

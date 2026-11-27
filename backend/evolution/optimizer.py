@@ -27,6 +27,10 @@ TUNABLE_SPACE: dict[str, tuple[float, float]] = {
     "strategies.micro_breakout.sl_atr_mult": (1.10, 1.90),
     "strategies.micro_breakout.tp_atr_mult": (1.90, 3.20),
     "strategies.ema_vwap_pullback.min_adx": (16.0, 26.0),
+    "strategies.structure_shift.min_engulf_body_atr": (0.35, 0.80),
+    "strategies.structure_shift.sl_buffer_atr": (0.10, 0.50),
+    "strategies.day_range_reversal.tp_rr": (1.2, 2.5),
+    "strategies.band_reversion.sl_buffer_atr": (0.15, 0.60),
 }
 
 

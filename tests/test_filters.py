@@ -91,8 +91,8 @@ def test_meta_features_append_context_and_old_models_still_work():
                            bb_width_pct_rank=0.5, body_atr_ratio=0.5)
     day = T0 - (T0 % 86400)
     v = extract_meta_features(sig, snap, 0.1, DLPrediction(), day + 13 * 3600, htf=(-1, 1))
-    assert len(v) == len(META_FEATURE_NAMES) == 29
-    assert list(v[24:]) == [1.0, -1.0, 0.0, 1.0, 1.0]  # sell with M15 down, against H1 up, overlap session
+    assert len(v) == len(META_FEATURE_NAMES) == 46
+    assert list(v[24:29]) == [1.0, -1.0, 0.0, 1.0, 1.0]  # sell with M15 down, against H1 up, overlap session
     old = CalibratedMetaLabeler()
     old.model = LogisticRegression().fit(np.random.RandomState(0).rand(40, 24), [0, 1] * 20)
     old.trained = True

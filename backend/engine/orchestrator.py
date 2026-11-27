@@ -34,9 +34,9 @@ from backend.evolution.bandit import ContextualBanditRL
 from backend.evolution.champion_gate import ChampionChallengerGate
 from backend.evolution.llm_reflector import LLMReflectionAnalyst
 from backend.llm.router import LLMRouter
-from backend.engine.exit_policy import NetTake, ProfitLock, evaluate, net_take
+from backend.engine.exit_policy import NetTake, ProfitLock, evaluate, net_take, stage_stop
 from backend.engine.exit_selector import ExitStyleSelector
-from backend.engine.filters import HTF_BUCKETS, SESSIONS, FilterLearner, decide
+from backend.engine.filters import HTF_BUCKETS, ICHI_BUCKETS, SESSIONS, FilterLearner, decide
 from backend.engine.hitrun_stop import Ghost, HitRunArm, HitRunPlan, HitRunTuner, plan_stop, time_stop_due
 from backend.engine.supervisor import SupervisorSettings, TradeSupervisor, build_context, price_drifted, scale_volume
 from backend.evolution.meta_labeler import CalibratedMetaLabeler
@@ -45,6 +45,9 @@ from backend.evolution.rl_exit_agent import RLExitAgent
 from backend.evolution.sequence_net import SequenceConvNet
 from backend.features.dataset import build_sequence_tensor, extract_meta_features
 from backend.features.htf import alignment, htf_bias, session_of
+from backend.features import ichimoku
+from backend.features.daylevels import prev_day_range
+from backend.features.structure import structure_context
 from backend.features.regime import classify_regime
 from backend.risk.manager import DEFAULT_SPECS, PortfolioRiskManager
 from backend.risk.shields import MarketShields
@@ -75,6 +78,8 @@ class ShadowPosition:
     htf_m15: int = 0  # entry context: +1 with the M15 direction, -1 against, 0 none
     htf_h1: int = 0
     session: str = ""
+    ichi_m15: int = 0  # M15 Ichimoku checklist score signed with the trade (-5..+5)
+    tp_stages: list[float] = field(default_factory=list)  # staged targets before tp (Normal and No Veto books)
 
 
 PAPER_VERSION = "PAPER"  # Normal book (kept for journal compatibility)
@@ -87,7 +92,7 @@ PAPER_LABELS: dict[str, str] = {"normal": "Normal", "hitrun": "Hit & Run", "raw"
 VETOED_BOOKS = ("normal", "hitrun")
 VETO_KEYS = ("APPROVE", "REDUCE", "REJECT", "NONE")
 PAPER_START_EQUITY = 10000.0
-BAR_BUFFER = 2000  # M1 bars kept per symbol: about 33 hours, enough for the H1 direction
+BAR_BUFFER = 3000  # M1 bars kept per symbol: about 50 hours (H1 direction, M15 Ichimoku, yesterday's range)
 SIGNAL_BARS = 600  # what the strategies, regime and models look at
 
 
@@ -555,12 +560,18 @@ class TradingOrchestrator:
             self.active_thought = f"{sym} shielded ({verdict.reason_code}): {verdict.detail}"
             return
 
-        # Scan 4 Scalping Micro-Strategies
-        signals = self.suite.scan_all(sym, bar_list, assess.indicators, assess.regime)
+        # Market facts from the full buffer: M15/H1 direction, M15 Ichimoku, yesterday's range
+        htf = (htf_bias(all_bars, 15), htf_bias(all_bars, 60))
+        ichi_m15 = ichimoku.htf_score(all_bars, 15)  # M15 Ichimoku checklist, needs ~26 h of M1 bars
+        prev_day = prev_day_range(all_bars)
+        mkt = {"prev_day": prev_day, "htf_m15": htf[0], "htf_h1": htf[1]}
+
+        signals = self.suite.scan_all(sym, bar_list, assess.indicators, assess.regime, context=mkt)
 
         # Also evaluate Challenger in parallel Live Shadow Arena!
-        htf = (htf_bias(all_bars, 15), htf_bias(all_bars, 60))
-        await self._scan_shadow_challenger(sym, bar_list, assess.indicators, assess.regime, dl_pred, spread_pts, spec, now_sec, htf)
+        await self._scan_shadow_challenger(
+            sym, bar_list, assess.indicators, assess.regime, dl_pred, spread_pts, spec, now_sec, htf, ichi_m15, prev_day,
+        )
 
         if not signals:
             # Compute live hunting readiness from indicator alignment so Cockpit always shows active hunt progress
@@ -582,12 +593,14 @@ class TradingOrchestrator:
         spread_price = spread_pts * spec.point
         feat_vec = extract_meta_features(
             best_sig, assess.indicators, spread_price, dl_pred, bar.timestamp, htf=htf, server_offset_sec=self.server_offset_sec,
+            structure=structure_context(bar_list, ichi_m15, prev_day),
         )
         side_sign = 1.0 if best_sig.side == Side.BUY else -1.0
         entry_ctx = {
             "htf_m15": alignment(side_sign, htf[0]),
             "htf_h1": alignment(side_sign, htf[1]),
             "session": session_of(bar.timestamp, self.server_offset_sec),
+            "ichi_m15": int(ichi_m15 * side_sign),
         }
         ml_prob = self.ml_labeler.predict_win_probability(feat_vec)
         dl_align = dl_pred.prob_up if best_sig.side == Side.BUY else dl_pred.prob_down
@@ -811,6 +824,7 @@ class TradingOrchestrator:
             spread_at_entry=spread_pts,
             exit_style=style,
             time_stop_bars=ts_bars,
+            tp_stages=self._stages_inside(best_sig, best_sig.entry_price, risk_dec.adjusted_tp) if style != "hitrun" else [],
         )
         if queued:
             self.active_thought = (
@@ -893,6 +907,8 @@ class TradingOrchestrator:
                 htf_m15=int(ctx.get("htf_m15", 0)),
                 htf_h1=int(ctx.get("htf_h1", 0)),
                 session=str(ctx.get("session", "")),
+                ichi_m15=int(ctx.get("ichi_m15", 0)),
+                tp_stages=self._stages_inside(sig, entry, tp) if name != "hitrun" else [],
             )
             opened = True
         if "raw" in books and h.own_stop and h.adaptive:
@@ -904,6 +920,13 @@ class TradingOrchestrator:
             self.hitrun_tuner.spawn(sym, assess.regime.value, sig.side, entry, int(utc_now_ms() // 1000), plans)
         if opened:
             await self._save_paper()
+
+    @staticmethod
+    def _stages_inside(sig: Any, entry: float, tp: float) -> list[float]:
+        """The signal's staged targets that lie between the entry and the final TP."""
+        stages = list(getattr(sig, "tp_stages", None) or [])
+        lo, hi = min(entry, tp), max(entry, tp)
+        return [float(x) for x in stages if lo < x < hi]
 
     def _paper_money(self, p: ShadowPosition, exit_px: float) -> float:
         spec = self.specs.get(p.symbol)
@@ -1062,6 +1085,12 @@ class TradingOrchestrator:
                     self._exit_policy(), side=p.side, entry=p.entry_price, risk=p.risk_dist,
                     price=px, peak_r=p.mfe_r, sl=p.sl, spread_px=spread_px,
                 )
+            if name != "hitrun" and p.tp_stages:
+                peak_px = p.entry_price + p.mfe_r * p.risk_dist if p.side == Side.BUY else p.entry_price - p.mfe_r * p.risk_dist
+                staged = stage_stop(side=p.side, entry=p.entry_price, stages=p.tp_stages, peak_price=peak_px,
+                                    sl=new_sl if action == "MOVE_SL" else p.sl, cost_px=spread_px)
+                if staged is not None and action != "CLOSE":
+                    action, new_sl = "MOVE_SL", staged
             if action == "MOVE_SL":
                 p.sl = round(new_sl, spec.digits if spec else 5)
                 changed = True
@@ -1139,7 +1168,7 @@ class TradingOrchestrator:
             last_action=RLExitAction.MOVE_BE if moved_to_be else RLExitAction.HOLD,
         )
         if p.session:
-            self.filter_learner.record(p.htf_m15, p.htf_h1, p.session, r)
+            self.filter_learner.record(p.htf_m15, p.htf_h1, p.session, r, ichi=p.ichi_m15)
             await self.db.set_kv("filter_stats", self.filter_learner.to_dict(), utc_now_ms())
         key = p.veto if p.veto in VETO_KEYS else "NONE"
         st = self.veto_stats.setdefault(key, {"n": 0, "wins": 0, "sum_r": 0.0, "sum_money": 0.0})
@@ -1159,6 +1188,7 @@ class TradingOrchestrator:
         return decide(
             self.filter_learner, htf_mode=f.htf_mode, htf_timeframe=f.htf_timeframe, session_mode=session_mode,
             blocked_sessions=f.blocked_sessions, m15=ctx["htf_m15"], h1=ctx["htf_h1"], session=ctx["session"],
+            ichimoku_mode=f.ichimoku_mode, ichi=int(ctx.get("ichi_m15", 0)), ichi_threshold=f.ichimoku_threshold,
         )
 
     def filters_view(self) -> dict[str, Any]:
@@ -1185,6 +1215,7 @@ class TradingOrchestrator:
             },
             "htf": {tf: self.filter_learner.table(f"htf:{tf}", HTF_BUCKETS) for tf in ("M15", "H1", "BOTH")},
             "session": self.filter_learner.table("session", SESSIONS),
+            "ichimoku": self.filter_learner.table(f"ichi:{f.ichimoku_threshold}", ICHI_BUCKETS),
             "server_offset_sec": self.server_offset_sec,
         }
 
@@ -1250,6 +1281,13 @@ class TradingOrchestrator:
                     self._exit_policy(), side=meta.side, entry=meta.entry_price, risk=meta.initial_risk_price,
                     price=pos.current_price, peak_r=meta.mfe_r, sl=pos.sl, spread_px=spread_px,
                 )
+                if meta.tp_stages:
+                    risk = meta.initial_risk_price
+                    peak_px = meta.entry_price + meta.mfe_r * risk if meta.side == Side.BUY else meta.entry_price - meta.mfe_r * risk
+                    staged = stage_stop(side=meta.side, entry=meta.entry_price, stages=meta.tp_stages, peak_price=peak_px,
+                                        sl=lock_sl if lock_action == "MOVE_SL" else pos.sl, cost_px=spread_px)
+                    if staged is not None:
+                        lock_action, lock_sl = "MOVE_SL", staged
             if lock_action == "CLOSE":
                 trace = close_tag.replace(" & ", "_").replace(" ", "_")
                 if meta.rl_trace[-1] != trace:
@@ -1409,19 +1447,24 @@ class TradingOrchestrator:
         spec: SymbolSpec,
         now_sec: int,
         htf: tuple[int, int] = (0, 0),
+        ichi_m15: int = 0,
+        prev_day: tuple[float, float] | None = None,
     ) -> None:
         if sym in self.shadow_positions:
             return
         cand = self.gate.active_challenger
         shadow_cfg = TradingConfig.model_validate(cand.config_snapshot) if cand else self.config
-        sigs = self.shadow_suite.scan_all(sym, bars, snap, regime)
+        sigs = self.shadow_suite.scan_all(sym, bars, snap, regime, context={"prev_day": prev_day, "htf_m15": htf[0], "htf_h1": htf[1]})
         if not sigs:
             return
         best = max(sigs, key=lambda s: s.confidence)
         spread_px = spread_pts * spec.point
         if (spread_px / max(snap.atr14, 1e-9)) > shadow_cfg.risk.max_spread_atr_ratio:
             return
-        feat = extract_meta_features(best, snap, spread_px, dl_pred, bars[-1].timestamp, htf=htf, server_offset_sec=self.server_offset_sec)
+        feat = extract_meta_features(
+            best, snap, spread_px, dl_pred, bars[-1].timestamp, htf=htf, server_offset_sec=self.server_offset_sec,
+            structure=structure_context(bars, ichi_m15, prev_day),
+        )
         ml_p = self.ml_labeler.predict_win_probability(feat)
         if ml_p < shadow_cfg.ai.ml_min_probability:
             return
