@@ -95,7 +95,7 @@ export default function App() {
             <BullishLogo size={32} />
             <div>
               <div className="flex items-center gap-1.5 leading-none">
-                <span className="font-bold tracking-wider text-sm">Bullish</span>
+                <span className="font-bold tracking-wider text-xs">MAX QUANT</span>
                 <span className="mono text-xs px-1.5 py-0.5 rounded bg-[#10B981]/15 text-[#10B981] border border-[#10B981]/40 font-bold">
                   {state?.champion_version || 'v1.0'}
                 </span>
