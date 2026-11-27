@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import { useState } from 'react';
 import {
   Activity,
   AlertTriangle,
@@ -9,10 +9,10 @@ import {
   Pause,
   Play,
   RefreshCw,
+  Settings,
   Shield,
   ShieldAlert,
   TrendingUp,
-  Zap,
 } from 'lucide-react';
 import { api, useLiveTelemetry } from './api/client';
 import { BrainView } from './components/BrainView';
@@ -20,18 +20,17 @@ import { EvolutionView } from './components/EvolutionView';
 import { ForensicsView } from './components/ForensicsView';
 import { KillSwitchModal } from './components/KillSwitchModal';
 import { LiveCandleChart } from './components/LiveCandleChart';
+import { LiveStatusStrip } from './components/LiveStatusStrip';
 import { RiskConfigView } from './components/RiskConfigView';
+import { SetupView } from './components/SetupView';
 
-type TabId = 'cockpit' | 'brain' | 'evolution' | 'journal' | 'risk';
-
-const PIPELINE_NODES = ['TICK', 'REGIME', '4 STRATS', 'DL 1D-CNN', 'ML META', 'RL BANDIT', 'EXEC + SHADOW'];
+type TabId = 'cockpit' | 'brain' | 'evolution' | 'journal' | 'risk' | 'setup';
 
 export default function App() {
   const { state, wsConnected } = useLiveTelemetry();
   const [tab, setTab] = useState<TabId>('cockpit');
   const [selectedSym, setSelectedSym] = useState('XAUUSD');
   const [logFilter, setLogFilter] = useState<'ALL' | 'EXEC' | 'BLOCK' | 'AI'>('ALL');
-  const [pipeStep, setPipeStep] = useState(0);
   const [killOpen, setKillOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
@@ -39,14 +38,6 @@ export default function App() {
     setToast(msg);
     window.setTimeout(() => setToast(null), 3200);
   };
-
-  // Continuous neural pipeline heartbeat synced with live engine
-  useEffect(() => {
-    const t = window.setInterval(() => {
-      setPipeStep((p) => (p + 1) % PIPELINE_NODES.length);
-    }, 360);
-    return () => window.clearInterval(t);
-  }, []);
 
   const symbols = state?.radar?.map((r) => r.symbol) || ['XAUUSD', 'EURUSD', 'GBPUSD', 'USDJPY'];
   const activeRadar = state?.radar?.find((r) => r.symbol === selectedSym) || state?.radar?.[0];
@@ -206,40 +197,18 @@ export default function App() {
         </div>
       </header>
 
-      {/* ANIMATED NEURAL PIPELINE PULSE BAR (Active Cognitive Heartbeat) */}
-      <div className="bg-[#0E1522] border-b border-[#1F2D45] px-3.5 py-2 flex flex-wrap items-center justify-between gap-2 text-xs">
-        <div className="flex items-center gap-1.5 overflow-x-auto">
-          <span className="mono font-bold text-[#8A9BB5] mr-1">ENGINE LOOP</span>
-          {PIPELINE_NODES.map((node, idx) => (
-            <React.Fragment key={node}>
-              <div
-                className={`px-2 py-0.5 rounded mono border transition-all ${
-                  idx === pipeStep
-                    ? 'border-[#3B82F6] bg-[#3B82F6]/20 text-white font-bold'
-                    : 'border-[#1F2D45] bg-[#121B2B] text-[#8A9BB5]'
-                }`}
-              >
-                {node}
-              </div>
-              {idx < PIPELINE_NODES.length - 1 && <span className="text-[#8A9BB5]">›</span>}
-            </React.Fragment>
-          ))}
-        </div>
-
-        <div className="flex items-center gap-2.5 min-w-0">
-          <span className="px-1.5 py-0.5 rounded bg-[#06B6D4]/15 text-[#06B6D4] border border-[#06B6D4]/40 mono font-bold shrink-0">HUNTING</span>
-          <span className="mono text-xs truncate max-w-md text-[#E6EDF7]">{state?.active_thought || 'Scanning M1 microstructure...'}</span>
-          <button
-            onClick={async () => {
-              const r = await api.triggerDemoSignal(selectedSym);
-              showToast(r.ok ? `Signal fired on ${selectedSym}` : `Skipped: ${r.reason || 'inflight'}`);
-            }}
-            className="px-2.5 py-1 rounded bg-[#3B82F6]/15 text-[#3B82F6] border border-[#3B82F6]/40 font-bold flex items-center gap-1 cursor-pointer shrink-0 hover:bg-[#3B82F6]/25"
-          >
-            <Zap className="w-3 h-3" /> Demo Signal
-          </button>
-        </div>
-      </div>
+      {/* LIVE STATUS: real values from the backend (MT5, entry gate, AI, supervisor, last verdict) */}
+      <LiveStatusStrip
+        state={state}
+        onDemoSignal={async () => {
+          try {
+            const r = await api.triggerDemoSignal(selectedSym);
+            showToast(r.ok ? `Signal fired on ${selectedSym}` : `Skipped: ${r.reason || 'inflight'}`);
+          } catch (err) {
+            showToast(`Demo signal refused: ${(err as Error).message}`);
+          }
+        }}
+      />
 
       {/* MAIN WORKSPACE */}
       <div className="flex-1 flex flex-col lg:flex-row">
@@ -251,6 +220,7 @@ export default function App() {
             { id: 'evolution' as TabId, label: 'Evolution & Shadow', icon: RefreshCw, badge: state?.active_challenger ? 1 : 0 },
             { id: 'journal' as TabId, label: 'Trade Forensics', icon: FileText },
             { id: 'risk' as TabId, label: 'Risk, Shields & MT5', icon: Shield },
+            { id: 'setup' as TabId, label: 'Setup (AI, Supervisor)', icon: Settings },
           ].map((item) => {
             const Icon = item.icon;
             const active = tab === item.id;
@@ -455,6 +425,7 @@ export default function App() {
           {tab === 'evolution' && <EvolutionView onToast={showToast} />}
           {tab === 'journal' && <ForensicsView symbols={symbols} />}
           {tab === 'risk' && <RiskConfigView onToast={showToast} />}
+          {tab === 'setup' && <SetupView onToast={showToast} />}
         </main>
       </div>
 

@@ -134,12 +134,41 @@ class EnvSettings(BaseSettings):
     api_port: int = 8765
 
 
-def load_trading_config(config_path: str | Path = "config/default.yaml") -> TradingConfig:
+LOCAL_CONFIG_PATH = Path("config/local.yaml")  # written by the dashboard Setup page, git-ignored
+
+
+def _deep_merge(base: dict[str, Any], over: dict[str, Any]) -> dict[str, Any]:
+    out = copy.deepcopy(base)
+    for k, v in over.items():
+        out[k] = _deep_merge(out[k], v) if isinstance(v, dict) and isinstance(out.get(k), dict) else v
+    return out
+
+
+def load_trading_config(
+    config_path: str | Path = "config/default.yaml", local_path: str | Path | None = LOCAL_CONFIG_PATH
+) -> TradingConfig:
     path = Path(config_path)
+    raw: dict[str, Any] = {}
     if path.exists():
         raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        return TradingConfig.model_validate(raw)
-    return TradingConfig()
+    if local_path and Path(local_path).exists():
+        local = yaml.safe_load(Path(local_path).read_text(encoding="utf-8")) or {}
+        # The trading mode is never taken from the local file: every start begins in the safe default.
+        if isinstance(local.get("app"), dict):
+            local["app"].pop("trading_mode", None)
+        raw = _deep_merge(raw, local)
+    return TradingConfig.model_validate(raw)
+
+
+def save_local_config(section: str, values: dict[str, Any], local_path: str | Path = LOCAL_CONFIG_PATH) -> None:
+    """Persist one config section (e.g. supervisor) to config/local.yaml, atomically."""
+    p = Path(local_path)
+    data = (yaml.safe_load(p.read_text(encoding="utf-8")) or {}) if p.exists() else {}
+    data[section] = values
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    tmp.replace(p)
 
 
 def get_nested_value(data: dict[str, Any], dotted_path: str) -> Any:
