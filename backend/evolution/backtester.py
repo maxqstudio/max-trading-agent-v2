@@ -16,6 +16,7 @@ from backend.core.models import (
 from backend.evolution.meta_labeler import CalibratedMetaLabeler
 from backend.evolution.sequence_net import SequenceConvNet
 from backend.features.dataset import build_sequence_tensor, extract_meta_features
+from backend.features.structure import structure_context
 from backend.features.htf import htf_bias_series
 from backend.features.regime import classify_regime
 from backend.risk.manager import DEFAULT_SPECS
@@ -102,6 +103,7 @@ class CausalBacktester:
                 feat_vec = extract_meta_features(
                     best_sig, assess.indicators, spread_price, dl_pred, bars[i].timestamp,
                     htf=(m15_bias[i], h1_bias[i]), server_offset_sec=self.server_offset_sec,
+                    structure=structure_context(window),
                 )
 
                 # ML Meta-Labeler filter (skip filtering if collecting raw training data)

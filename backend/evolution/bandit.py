@@ -12,6 +12,7 @@ DEFAULT_STRATEGIES = [
     "micro_breakout",
     "ema_vwap_pullback",
     "tick_imbalance",
+    "structure_shift",
 ]
 
 
@@ -49,7 +50,11 @@ class ContextualBanditRL:
                 ):
                     prior_a = 2.5
                 sym_map[reg][s] = {"alpha": prior_a, "beta": prior_b, "n": 0.0, "avg_r": 0.0}
-        return sym_map[reg]
+        ctx = sym_map[reg]
+        for s in self.strategies:
+            # A strategy added after this state was saved starts with a neutral prior.
+            ctx.setdefault(s, {"alpha": 2.0, "beta": 2.0, "n": 0.0, "avg_r": 0.0})
+        return ctx
 
     def update(self, symbol: str, regime: MarketRegime | str, strategy_id: str, pnl_r: float) -> None:
         ctx = self._ensure_context(symbol, regime)

@@ -9,6 +9,7 @@ from backend.strategies.base import BaseScalpingStrategy
 from backend.strategies.ema_vwap_pullback import EmaVwapPullbackStrategy
 from backend.strategies.liquidity_sweep import LiquiditySweepStrategy
 from backend.strategies.micro_breakout import MicroBreakoutStrategy
+from backend.strategies.structure_shift import StructureShiftStrategy
 from backend.strategies.tick_imbalance import TickImbalanceStrategy
 
 STRATEGY_CLASSES: dict[str, type[BaseScalpingStrategy]] = {
@@ -16,6 +17,7 @@ STRATEGY_CLASSES: dict[str, type[BaseScalpingStrategy]] = {
     "micro_breakout": MicroBreakoutStrategy,
     "ema_vwap_pullback": EmaVwapPullbackStrategy,
     "tick_imbalance": TickImbalanceStrategy,
+    "structure_shift": StructureShiftStrategy,
 }
 
 

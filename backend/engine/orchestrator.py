@@ -34,7 +34,7 @@ from backend.evolution.bandit import ContextualBanditRL
 from backend.evolution.champion_gate import ChampionChallengerGate
 from backend.evolution.llm_reflector import LLMReflectionAnalyst
 from backend.llm.router import LLMRouter
-from backend.engine.exit_policy import NetTake, ProfitLock, evaluate, net_take
+from backend.engine.exit_policy import NetTake, ProfitLock, evaluate, net_take, stage_stop
 from backend.engine.exit_selector import ExitStyleSelector
 from backend.engine.filters import HTF_BUCKETS, SESSIONS, FilterLearner, decide
 from backend.engine.hitrun_stop import Ghost, HitRunArm, HitRunPlan, HitRunTuner, plan_stop, time_stop_due
@@ -45,6 +45,7 @@ from backend.evolution.rl_exit_agent import RLExitAgent
 from backend.evolution.sequence_net import SequenceConvNet
 from backend.features.dataset import build_sequence_tensor, extract_meta_features
 from backend.features.htf import alignment, htf_bias, session_of
+from backend.features.structure import structure_context
 from backend.features.regime import classify_regime
 from backend.risk.manager import DEFAULT_SPECS, PortfolioRiskManager
 from backend.risk.shields import MarketShields
@@ -75,6 +76,7 @@ class ShadowPosition:
     htf_m15: int = 0  # entry context: +1 with the M15 direction, -1 against, 0 none
     htf_h1: int = 0
     session: str = ""
+    tp_stages: list[float] = field(default_factory=list)  # staged targets before tp (Normal and No Veto books)
 
 
 PAPER_VERSION = "PAPER"  # Normal book (kept for journal compatibility)
@@ -582,6 +584,7 @@ class TradingOrchestrator:
         spread_price = spread_pts * spec.point
         feat_vec = extract_meta_features(
             best_sig, assess.indicators, spread_price, dl_pred, bar.timestamp, htf=htf, server_offset_sec=self.server_offset_sec,
+            structure=structure_context(bar_list),
         )
         side_sign = 1.0 if best_sig.side == Side.BUY else -1.0
         entry_ctx = {
@@ -811,6 +814,7 @@ class TradingOrchestrator:
             spread_at_entry=spread_pts,
             exit_style=style,
             time_stop_bars=ts_bars,
+            tp_stages=self._stages_inside(best_sig, best_sig.entry_price, risk_dec.adjusted_tp) if style != "hitrun" else [],
         )
         if queued:
             self.active_thought = (
@@ -893,6 +897,7 @@ class TradingOrchestrator:
                 htf_m15=int(ctx.get("htf_m15", 0)),
                 htf_h1=int(ctx.get("htf_h1", 0)),
                 session=str(ctx.get("session", "")),
+                tp_stages=self._stages_inside(sig, entry, tp) if name != "hitrun" else [],
             )
             opened = True
         if "raw" in books and h.own_stop and h.adaptive:
@@ -904,6 +909,13 @@ class TradingOrchestrator:
             self.hitrun_tuner.spawn(sym, assess.regime.value, sig.side, entry, int(utc_now_ms() // 1000), plans)
         if opened:
             await self._save_paper()
+
+    @staticmethod
+    def _stages_inside(sig: Any, entry: float, tp: float) -> list[float]:
+        """The signal's staged targets that lie between the entry and the final TP."""
+        stages = list(getattr(sig, "tp_stages", None) or [])
+        lo, hi = min(entry, tp), max(entry, tp)
+        return [float(x) for x in stages if lo < x < hi]
 
     def _paper_money(self, p: ShadowPosition, exit_px: float) -> float:
         spec = self.specs.get(p.symbol)
@@ -1062,6 +1074,12 @@ class TradingOrchestrator:
                     self._exit_policy(), side=p.side, entry=p.entry_price, risk=p.risk_dist,
                     price=px, peak_r=p.mfe_r, sl=p.sl, spread_px=spread_px,
                 )
+            if name != "hitrun" and p.tp_stages:
+                peak_px = p.entry_price + p.mfe_r * p.risk_dist if p.side == Side.BUY else p.entry_price - p.mfe_r * p.risk_dist
+                staged = stage_stop(side=p.side, entry=p.entry_price, stages=p.tp_stages, peak_price=peak_px,
+                                    sl=new_sl if action == "MOVE_SL" else p.sl, cost_px=spread_px)
+                if staged is not None and action != "CLOSE":
+                    action, new_sl = "MOVE_SL", staged
             if action == "MOVE_SL":
                 p.sl = round(new_sl, spec.digits if spec else 5)
                 changed = True
@@ -1250,6 +1268,13 @@ class TradingOrchestrator:
                     self._exit_policy(), side=meta.side, entry=meta.entry_price, risk=meta.initial_risk_price,
                     price=pos.current_price, peak_r=meta.mfe_r, sl=pos.sl, spread_px=spread_px,
                 )
+                if meta.tp_stages:
+                    risk = meta.initial_risk_price
+                    peak_px = meta.entry_price + meta.mfe_r * risk if meta.side == Side.BUY else meta.entry_price - meta.mfe_r * risk
+                    staged = stage_stop(side=meta.side, entry=meta.entry_price, stages=meta.tp_stages, peak_price=peak_px,
+                                        sl=lock_sl if lock_action == "MOVE_SL" else pos.sl, cost_px=spread_px)
+                    if staged is not None:
+                        lock_action, lock_sl = "MOVE_SL", staged
             if lock_action == "CLOSE":
                 trace = close_tag.replace(" & ", "_").replace(" ", "_")
                 if meta.rl_trace[-1] != trace:
@@ -1421,7 +1446,10 @@ class TradingOrchestrator:
         spread_px = spread_pts * spec.point
         if (spread_px / max(snap.atr14, 1e-9)) > shadow_cfg.risk.max_spread_atr_ratio:
             return
-        feat = extract_meta_features(best, snap, spread_px, dl_pred, bars[-1].timestamp, htf=htf, server_offset_sec=self.server_offset_sec)
+        feat = extract_meta_features(
+            best, snap, spread_px, dl_pred, bars[-1].timestamp, htf=htf, server_offset_sec=self.server_offset_sec,
+            structure=structure_context(bars),
+        )
         ml_p = self.ml_labeler.predict_win_probability(feat)
         if ml_p < shadow_cfg.ai.ml_min_probability:
             return

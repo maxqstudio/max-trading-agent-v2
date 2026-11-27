@@ -35,6 +35,10 @@ HARD_SAFETY_BOUNDS: dict[str, tuple[float, float]] = {
     "strategies.tick_imbalance.min_momentum_atr": (0.30, 1.40),
     "strategies.tick_imbalance.sl_atr_mult": (0.85, 2.20),
     "strategies.tick_imbalance.tp_atr_mult": (1.30, 3.80),
+    "strategies.structure_shift.min_engulf_body_atr": (0.20, 1.20),
+    "strategies.structure_shift.sl_buffer_atr": (0.05, 0.80),
+    "strategies.structure_shift.retest_min": (0.236, 0.618),
+    "strategies.structure_shift.target_stage": (1.0, 3.0),
 }
 
 INTEGER_PATHS: set[str] = {

@@ -134,7 +134,7 @@ def test_hard_safety_bounds_clamp_extreme_llm_or_optimizer_patches() -> None:
     assert all(p.path != "app.trading_mode" for p in applied)
 
 
-def test_strategy_suite_loads_all_four_scalping_strategies() -> None:
+def test_strategy_suite_loads_all_scalping_strategies() -> None:
     cfg = load_trading_config()
     suite = StrategySuite.from_config(cfg)
     assert set(suite.strategies.keys()) == {
@@ -142,4 +142,5 @@ def test_strategy_suite_loads_all_four_scalping_strategies() -> None:
         "micro_breakout",
         "ema_vwap_pullback",
         "tick_imbalance",
+        "structure_shift",
     }

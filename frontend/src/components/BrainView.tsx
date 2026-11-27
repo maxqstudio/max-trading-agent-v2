@@ -72,12 +72,13 @@ export const BrainView: React.FC<{ symbols: string[] }> = ({ symbols }) => {
     ctx.stroke();
   }, [data]);
 
-  const strats = ['liquidity_sweep', 'micro_breakout', 'ema_vwap_pullback', 'tick_imbalance'];
+  const strats = ['liquidity_sweep', 'micro_breakout', 'ema_vwap_pullback', 'tick_imbalance', 'structure_shift'];
   const stratLabels: Record<string, string> = {
     liquidity_sweep: 'LiquiditySweep',
     micro_breakout: 'MicroBreakout',
     ema_vwap_pullback: 'EmaVwapPull',
     tick_imbalance: 'TickImbalance',
+    structure_shift: 'StructureShift',
   };
 
   return (

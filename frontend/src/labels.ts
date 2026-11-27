@@ -18,6 +18,7 @@ const LABELS: Record<string, string> = {
   micro_breakout: 'Micro Breakout',
   ema_vwap_pullback: 'EMA VWAP Pullback',
   tick_imbalance: 'Tick Imbalance',
+  structure_shift: 'Structure Shift',
   // exit actions
   HOLD: 'Hold',
   MOVE_BE: 'Move to breakeven',
