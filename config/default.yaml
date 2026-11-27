@@ -92,6 +92,44 @@ strategies:
     min_momentum_atr: 0.55
     sl_atr_mult: 1.25
     tp_atr_mult: 2.00
+  # Engulfing, break of the nearest swing level, Fibonacci retest (leg drawn to the breaking
+  # candle's close), targets at leg extensions 1.618 / 2.618 / 4.236.
+  structure_shift:
+    enabled: true
+    swing_bars: 3            # swing = higher/lower than this many candles on each side
+    setup_window: 60         # how far back (M1 candles) to look for the engulfing candle
+    max_break_bars: 15       # the level must break within this many candles of the engulfing
+    max_retest_bars: 25      # the retest entry must come within this many candles of the break
+    min_engulf_body_atr: 0.5
+    min_leg_atr: 1.5         # leg from the low/high of the move to the breaking close, in ATR
+    retest_min: 0.382        # pullback must reach at least this retracement (38.2%)
+    invalid_level: 0.786     # a pullback beyond 78.6% cancels the setup
+    sl_buffer_atr: 0.2       # SL beyond the retest extreme
+    max_sl_atr: 3.0          # skip if the stop would be wider than this
+    target_stage: 2          # final TP: 1 = 1.618, 2 = 2.618, 3 = 4.236 (earlier ones step the stop)
+  # Counter trend: through yesterday's low/high and back, Stochastic 14,3,3 out of 20/80,
+  # close beyond the 3-period SMA shifted 3.
+  day_range_reversal:
+    enabled: true
+    sweep_bars: 30           # the poke through yesterday's level must be within this many M1 candles
+    stoch_low: 20.0
+    stoch_high: 80.0
+    sma_period: 3
+    sma_shift: 3
+    sl_buffer_atr: 0.2
+    max_sl_atr: 3.0
+    tp_rr: 1.5
+  # Counter trend: close outside Bollinger (20, 2) then back inside, Stochastic turning from
+  # 20/80, only when the H1 direction is not against it.
+  band_reversion:
+    enabled: true
+    outside_bars: 3
+    stoch_low: 20.0
+    stoch_high: 80.0
+    sl_buffer_atr: 0.3
+    max_sl_atr: 3.0
+    trend_filter: not_against  # or "with": the H1 direction must agree
+    target: opposite           # or "middle"
 
 evolution:
   schedule_interval_minutes: 240

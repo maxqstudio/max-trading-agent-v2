@@ -59,6 +59,21 @@ def _better(side: Side, new_sl: float, cur_sl: float) -> bool:
     return new_sl > cur_sl if side == Side.BUY else new_sl < cur_sl
 
 
+def stage_stop(*, side: Side, entry: float, stages: list[float], peak_price: float, sl: float, cost_px: float = 0.0) -> float | None:
+    """Staged targets: once the best price has passed stage i, the stop goes to breakeven
+    (+ costs) for the first stage, and to the previous stage after that. Returns the new stop
+    when it is better than ``sl``, else None."""
+    passed = [i for i, lvl in enumerate(stages) if (peak_price >= lvl if side == Side.BUY else peak_price <= lvl)]
+    if not passed:
+        return None
+    i = passed[-1]
+    if i == 0:
+        new_sl = entry + cost_px if side == Side.BUY else entry - cost_px
+    else:
+        new_sl = stages[i - 1]
+    return new_sl if _better(side, new_sl, sl) else None
+
+
 def evaluate(
     policy: ProfitLock,
     *,

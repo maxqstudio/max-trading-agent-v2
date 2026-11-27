@@ -80,6 +80,8 @@ class FilterSetupRequest(BaseModel):
     htf_timeframe: Literal["M15", "H1", "BOTH"] | None = None
     session_mode: Literal["off", "on", "auto"] | None = None
     blocked_sessions: list[Literal["asia", "london", "overlap", "newyork", "late"]] | None = None
+    ichimoku_mode: Literal["off", "on", "auto"] | None = None
+    ichimoku_threshold: Literal[2, 3, 4] | None = None
     min_samples: int | None = Field(default=None, ge=10, le=1000)
     news_enabled: bool | None = None
     news_buffer_minutes: int | None = Field(default=None, ge=0, le=240)

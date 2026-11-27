@@ -16,6 +16,9 @@ from backend.core.models import (
 from backend.evolution.meta_labeler import CalibratedMetaLabeler
 from backend.evolution.sequence_net import SequenceConvNet
 from backend.features.dataset import build_sequence_tensor, extract_meta_features
+from backend.features import ichimoku
+from backend.features.daylevels import prev_day_series
+from backend.features.structure import structure_context
 from backend.features.htf import htf_bias_series
 from backend.features.regime import classify_regime
 from backend.risk.manager import DEFAULT_SPECS
@@ -73,6 +76,8 @@ class CausalBacktester:
             # Higher-timeframe direction known at each bar (completed M15/H1 bars only).
             m15_bias = htf_bias_series(bars, 15)
             h1_bias = htf_bias_series(bars, 60)
+            ichi_m15 = ichimoku.htf_score_series(bars, 15)
+            prev_days = prev_day_series(bars)
             i = 48
             while i < len(bars) - 2:
                 # Indicators only look back a few hundred bars (the live engine keeps 600), so a
@@ -88,7 +93,10 @@ class CausalBacktester:
                     i += 1
                     continue
 
-                sigs = suite.scan_all(symbol, window, assess.indicators, assess.regime)
+                sigs = suite.scan_all(
+                    symbol, window, assess.indicators, assess.regime,
+                    context={"prev_day": prev_days[i], "htf_m15": m15_bias[i], "htf_h1": h1_bias[i]},
+                )
                 if not sigs:
                     i += 1
                     continue
@@ -102,6 +110,7 @@ class CausalBacktester:
                 feat_vec = extract_meta_features(
                     best_sig, assess.indicators, spread_price, dl_pred, bars[i].timestamp,
                     htf=(m15_bias[i], h1_bias[i]), server_offset_sec=self.server_offset_sec,
+                    structure=structure_context(window, ichi_m15[i], prev_days[i]),
                 )
 
                 # ML Meta-Labeler filter (skip filtering if collecting raw training data)

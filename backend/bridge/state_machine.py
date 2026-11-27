@@ -31,6 +31,7 @@ class PendingOrderRecord:
     dispatched_at_ms: int = 0
     exit_style: str = ""  # "normal" or "hitrun", decided at entry
     time_stop_bars: int = 0  # Hit & Run time stop (M1 bars, 0 = off)
+    tp_stages: list[float] = field(default_factory=list)  # staged targets before the TP
 
 
 @dataclass
@@ -63,6 +64,7 @@ class TrackedPositionMeta:
     rl_trace: list[str] = field(default_factory=lambda: ["HOLD"])
     exit_style: str = ""  # "" = opened before exit styles were fixed at entry
     time_stop_bars: int = 0
+    tp_stages: list[float] = field(default_factory=list)
 
 
 class IdempotentOrderStateMachine:
@@ -129,6 +131,7 @@ class IdempotentOrderStateMachine:
         spread_at_entry: float = 0.0,
         exit_style: str = "",
         time_stop_bars: int = 0,
+        tp_stages: list[float] | None = None,
     ) -> bool:
         """Idempotently enqueue an order command. Returns False if duplicate ID or inflight open exists."""
         if cmd.client_order_id in self._seen_ids:
@@ -155,6 +158,7 @@ class IdempotentOrderStateMachine:
             spread_at_entry=spread_at_entry,
             exit_style=exit_style,
             time_stop_bars=time_stop_bars,
+            tp_stages=list(tp_stages or []),
         )
         self._queue.append(cmd)
         return True
@@ -220,6 +224,7 @@ class IdempotentOrderStateMachine:
                     commission=ack.commission,
                     exit_style=rec.exit_style,
                     time_stop_bars=rec.time_stop_bars,
+                    tp_stages=list(rec.tp_stages),
                 )
             processed.append(ack)
         return processed

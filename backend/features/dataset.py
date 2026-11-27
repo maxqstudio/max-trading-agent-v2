@@ -5,8 +5,9 @@ import math
 import numpy as np
 
 from backend.core.models import Bar, DLPrediction, MarketRegime, Side, TradeSignal
-from backend.features.indicators import IndicatorSnapshot, atr, ema
 from backend.features.htf import alignment, session_of
+from backend.features.indicators import IndicatorSnapshot, atr, ema
+from backend.features.structure import ALIGNED_NAMES, aligned_context
 
 REGIME_INDEX: dict[MarketRegime, int] = {
     MarketRegime.TRENDING_BULL: 0,
@@ -22,6 +23,8 @@ STRATEGY_INDEX: dict[str, int] = {
     "ema_vwap_pullback": 2,
     "tick_imbalance": 3,
 }
+# Strategies added after the first 24 columns get their one-hot at the end instead.
+LATE_STRATEGIES: tuple[str, ...] = ("structure_shift", "day_range_reversal", "band_reversion")
 
 META_FEATURE_NAMES: list[str] = [
     "regime_bull",
@@ -54,6 +57,26 @@ META_FEATURE_NAMES: list[str] = [
     "session_asia",
     "session_london",
     "session_newyork",
+    # Structure context (with the trade = +1, against = -1)
+    "strat_structure_shift",
+    "strat_day_range_reversal",
+    "strat_band_reversion",
+    "sd_zone_align",
+    "kumo_align",
+    "bb_pos_align",
+    "engulf_align",
+    # Ichimoku checklist (M1 and M15), Tenkan/Kijun cross, Chikou, future cloud, cloud thickness, Kijun stretch
+    "ichi_score_align",
+    "ichi_m15_align",
+    "ichi_tk_cross_align",
+    "ichi_chikou_align",
+    "ichi_future_cloud_align",
+    "ichi_cloud_thick_atr",
+    "ichi_kijun_dist_align",
+    # Trend (EMA 20 vs EMA 100 and their slope), Stochastic 14,3,3, position in yesterday's range
+    "ema20_100_align",
+    "stoch_align",
+    "prev_day_pos_align",
 ]
 BASE_META_FEATURES = 24
 
@@ -166,6 +189,7 @@ def extract_meta_features(
     timestamp_sec: int,
     htf: tuple[int, int] = (0, 0),
     server_offset_sec: int = 0,
+    structure: dict[str, float] | None = None,
 ) -> np.ndarray:
     """Tabular feature vector: regime, strategy, microstructure, DL probabilities, then the
     M15/H1 direction (+1 with the trade, -1 against, 0 none) and the trading session."""
@@ -173,7 +197,10 @@ def extract_meta_features(
     reg_oh[REGIME_INDEX.get(signal.regime, 2)] = 1.0
 
     strat_oh = [0.0] * 4
-    strat_oh[STRATEGY_INDEX.get(signal.strategy_id, 0)] = 1.0
+    if signal.strategy_id in STRATEGY_INDEX:
+        strat_oh[STRATEGY_INDEX[signal.strategy_id]] = 1.0
+    elif signal.strategy_id not in LATE_STRATEGIES:
+        strat_oh[0] = 1.0  # unknown ids keep the old behaviour
 
     is_buy = signal.side == Side.BUY
     side_sign = 1.0 if is_buy else -1.0
@@ -214,4 +241,9 @@ def extract_meta_features(
         1.0 if sess in ("london", "overlap") else 0.0,
         1.0 if sess in ("newyork", "overlap") else 0.0,
     ]
+    vec += [1.0 if signal.strategy_id == s else 0.0 for s in LATE_STRATEGIES]
+    vec += aligned_context(structure, side_sign)
     return np.array(vec, dtype=np.float64)
+
+
+assert META_FEATURE_NAMES[-len(ALIGNED_NAMES) :] == list(ALIGNED_NAMES)

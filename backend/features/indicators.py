@@ -221,3 +221,23 @@ def compute_indicator_snapshot(bars: list[Bar]) -> IndicatorSnapshot | None:
         rel_volume=float(volumes[-1]) / max(vol_base, 1.0),
         ema_slope_atr=ema_slope,
     )
+
+
+def stochastic(highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, k: int = 14, slow: int = 3, d: int = 3) -> tuple[np.ndarray, np.ndarray]:
+    """Slow Stochastic (k, slow, d), e.g. 14,3,3: raw %K over ``k`` bars smoothed by ``slow``,
+    and %D as the ``d``-bar average of that. Values 0..100; 50 until there are ``k`` bars."""
+    n = len(closes)
+    raw = np.full(n, 50.0)
+    for i in range(k - 1, n):
+        hh = float(highs[i - k + 1 : i + 1].max())
+        ll = float(lows[i - k + 1 : i + 1].min())
+        raw[i] = 50.0 if hh - ll <= 0 else (float(closes[i]) - ll) / (hh - ll) * 100.0
+    k_line = _rolling_mean(raw, slow)
+    return k_line, _rolling_mean(k_line, d)
+
+
+def _rolling_mean(x: np.ndarray, period: int) -> np.ndarray:
+    out = np.empty(len(x), dtype=np.float64)
+    for i in range(len(x)):
+        out[i] = float(np.mean(x[max(0, i - period + 1) : i + 1]))
+    return out

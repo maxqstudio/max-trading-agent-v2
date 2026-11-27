@@ -20,11 +20,14 @@ export interface FiltersView {
     htf_timeframe: 'M15' | 'H1' | 'BOTH';
     session_mode: Mode;
     blocked_sessions: string[];
+    ichimoku_mode: Mode;
+    ichimoku_threshold: 2 | 3 | 4;
     min_samples: number;
   };
   news: { enabled: boolean; buffer_minutes: number; from_mt5: boolean; mt5_updated_ts: number; upcoming: { title: string; time_utc: number }[] };
   htf: Record<string, BucketRow[]>;
   session: BucketRow[];
+  ichimoku?: BucketRow[];
   server_offset_sec: number;
 }
 
@@ -36,6 +39,7 @@ const SESSION_LABEL: Record<string, string> = {
   newyork: 'New York (16:00 to 21:00)',
   late: 'Late (21:00 to 23:00)',
 };
+const ICHI_LABEL: Record<string, string> = { with: 'Checklist with the trade', mixed: 'Mixed', against: 'Checklist against the trade' };
 const BUCKET_LABEL: Record<string, string> = { with: 'With the direction', neutral: 'No clear direction', against: 'Against the direction' };
 const MODE_HELP: Record<Mode, string> = {
   off: 'never blocks',
@@ -185,6 +189,38 @@ export const FiltersCard: React.FC<{ view: FiltersView; onSaved: (v: FiltersView
           Hours are UTC. Broker server time offset: {view.server_offset_sec >= 0 ? '+' : ''}
           {(view.server_offset_sec / 3600).toFixed(1)} h{view.server_offset_sec === 0 ? ' (EA 2.10 or newer reports it)' : ''}.
         </p>
+      </div>
+
+      {/* Ichimoku */}
+      <div className="cockpit-sub rounded-md p-2.5 space-y-2">
+        <div className="font-bold">Ichimoku checklist (M15)</div>
+        <p className="text-[#8A9BB5]">
+          Five points on completed M15 candles: price against the cloud, Tenkan against Kijun, Chikou against the price and cloud of 26
+          candles ago, price against Kijun, and the colour of the cloud ahead. Each point is +1 with the trade or -1 against it; the score is their sum.
+        </p>
+        <div className="grid grid-cols-2 gap-2.5">
+          <label className="space-y-1">
+            <span className="text-[#8A9BB5]">Mode ({MODE_HELP[s.ichimoku_mode ?? 'auto']})</span>
+            <select value={s.ichimoku_mode ?? 'auto'} onChange={(e) => setS({ ...s, ichimoku_mode: e.target.value as Mode })} className={inputCls}>
+              <option value="auto">Auto</option>
+              <option value="on">On</option>
+              <option value="off">Off</option>
+            </select>
+          </label>
+          <label className="space-y-1">
+            <span className="text-[#8A9BB5]">Against when the score (+5 to -5) is</span>
+            <select
+              value={s.ichimoku_threshold ?? 3}
+              onChange={(e) => setS({ ...s, ichimoku_threshold: Number(e.target.value) as 2 | 3 | 4 })}
+              className={inputCls}
+            >
+              <option value={2}>-2 or lower</option>
+              <option value={3}>-3 or lower</option>
+              <option value={4}>-4 or lower</option>
+            </select>
+          </label>
+        </div>
+        <StatsTable rows={view.ichimoku ?? []} label={(b) => ICHI_LABEL[b] ?? b} minSamples={s.min_samples} />
       </div>
 
       {/* News */}

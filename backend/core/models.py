@@ -227,6 +227,8 @@ class TradeSignal(BaseModel):
     regime: MarketRegime
     reason: str = ""
     features: dict[str, float] = Field(default_factory=dict)
+    # Staged targets before tp_price (nearest first). Passing one steps the stop up.
+    tp_stages: list[float] = Field(default_factory=list)
     timestamp: int = 0
 
 
