@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.llm.base import LLMError, LLMRequest, LLMResult, Provider
-from backend.llm.settings import ResolvedProvider, load_chain
+from backend.llm.settings import ResolvedProvider, load_chain, load_model_chains
 
 log = logging.getLogger("max_agent.llm")
 
@@ -42,14 +42,26 @@ class LLMRouter:
     factory: Callable[[ResolvedProvider], Provider] = build_provider
     stats: dict[str, ProviderStats] = field(default_factory=dict)
     _cache: dict[str, Provider] = field(default_factory=dict)
+    main_chain: list[ResolvedProvider] = field(default_factory=list)
+    fast_chain: list[ResolvedProvider] = field(default_factory=list)
 
     @classmethod
     def from_env(cls, env_file: str | Path | None = ".env") -> "LLMRouter":
-        return cls(resolved=load_chain(env_file))
+        main_chain, fast_chain = load_model_chains(env_file)
+        return cls(resolved=load_chain(env_file), main_chain=main_chain, fast_chain=fast_chain)
 
-    def reload(self, resolved: list[ResolvedProvider]) -> None:
-        """Swap the provider chain in place (after a settings change); stats are kept."""
+    def reload(
+        self,
+        resolved: list[ResolvedProvider],
+        main_chain: list[ResolvedProvider] | None = None,
+        fast_chain: list[ResolvedProvider] | None = None,
+    ) -> None:
+        """Swap the provider & cross-provider model chains in place; stats are kept."""
         self.resolved = resolved
+        if main_chain is not None:
+            self.main_chain = main_chain
+        if fast_chain is not None:
+            self.fast_chain = fast_chain
         self._cache.clear()
 
     @property
@@ -57,8 +69,18 @@ class LLMRouter:
         return [r for r in self.resolved if r.configured]
 
     @property
+    def active_main(self) -> list[ResolvedProvider]:
+        explicit = [r for r in self.main_chain if r.configured]
+        return explicit if explicit else [a for rp in self.active for a in self._attempts(rp)]
+
+    @property
+    def active_fast(self) -> list[ResolvedProvider]:
+        explicit = [r for r in self.fast_chain if r.configured]
+        return explicit if explicit else [a for rp in self.active for a in self._attempts(rp)]
+
+    @property
     def enabled(self) -> bool:
-        return bool(self.active)
+        return bool(self.active or any(r.configured for r in self.main_chain) or any(r.configured for r in self.fast_chain))
 
     def _provider(self, rp: ResolvedProvider) -> Provider:
         key = f"{rp.name}|{rp.model}|{rp.fast_model}"
@@ -76,10 +98,10 @@ class LLMRouter:
         return out
 
     async def complete(self, req: LLMRequest, validate: Callable[[dict[str, Any]], Any] | None = None) -> tuple[LLMResult, Any]:
-        """Return (result, validated) from the first provider whose answer passes ``validate``."""
+        """Return (result, validated) from the first provider:model whose answer passes ``validate``."""
         errors: list[str] = []
-        for attempt in (a for rp in self.active for a in self._attempts(rp)):
-            rp = attempt
+        attempts = self.active_fast if req.fast else self.active_main
+        for rp in attempts:
             st = self.stats.setdefault(rp.name, ProviderStats())
             st.calls += 1
             try:
@@ -105,6 +127,8 @@ class LLMRouter:
     def status(self) -> dict[str, Any]:
         return {
             "enabled": self.enabled,
+            "main_chain": [f"{r.name}:{r.model}" for r in self.main_chain],
+            "fast_chain": [f"{r.name}:{r.fast_model}" for r in self.fast_chain],
             "chain": [
                 {
                     "provider": r.name,

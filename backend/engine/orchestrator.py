@@ -361,16 +361,19 @@ class TradingOrchestrator:
                 pass
 
     def llm_brief(self) -> dict[str, Any]:
-        """Which AI answers right now (first configured provider in the chain) and today's spend."""
-        active = self.llm.active
-        first = active[0] if active else None
+        """Which AI answers right now (from active fast/main chain) and today's spend."""
+        fast_list = self.llm.active_fast
+        main_list = self.llm.active_main
+        first_fast = fast_list[0] if fast_list else (main_list[0] if main_list else None)
+        first_main = main_list[0] if main_list else first_fast
+        fallbacks = [f"{r.name}:{r.fast_model}" for r in fast_list[1:]]
         return {
-            "enabled": bool(active),
-            "provider": first.name if first else "",
-            "label": first.preset.label if first else "Deterministic (no AI key)",
-            "model": first.model if first else "",
-            "fast_model": first.fast_model if first else "",
-            "fallbacks": [r.name for r in active[1:]],
+            "enabled": self.llm.enabled,
+            "provider": first_fast.name if first_fast else "",
+            "label": first_fast.preset.label if first_fast else "Deterministic (no AI key)",
+            "model": first_main.model if first_main else "",
+            "fast_model": first_fast.fast_model if first_fast else "",
+            "fallbacks": fallbacks,
             "total_cost_usd": round(sum(st.total_cost_usd for st in self.llm.stats.values()), 4),
         }
 
