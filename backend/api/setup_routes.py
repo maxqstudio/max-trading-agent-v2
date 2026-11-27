@@ -75,6 +75,16 @@ class ExitSetupRequest(BaseModel):
     adaptive: bool | None = None
 
 
+class FilterSetupRequest(BaseModel):
+    htf_mode: Literal["off", "on", "auto"] | None = None
+    htf_timeframe: Literal["M15", "H1", "BOTH"] | None = None
+    session_mode: Literal["off", "on", "auto"] | None = None
+    blocked_sessions: list[Literal["asia", "london", "overlap", "newyork", "late"]] | None = None
+    min_samples: int | None = Field(default=None, ge=10, le=1000)
+    news_enabled: bool | None = None
+    news_buffer_minutes: int | None = Field(default=None, ge=0, le=240)
+
+
 class CostSetupRequest(BaseModel):
     # null = automatic (learned from closed MT5 trades, symbol default until then)
     commission_per_lot: float | None = Field(default=None, ge=0.0, le=200.0)
@@ -159,7 +169,23 @@ def register_setup_routes(api: APIRouter, orch: TradingOrchestrator, env_path: s
     @api.get("/setup")
     async def get_setup() -> dict[str, Any]:
         return {"llm": llm_view(), "supervisor": supervisor_view(), "mt5": mt5_view(), "safety": safety_view(), "costs": costs_view(),
-                "hit_run": orch.config.paper.hit_run.model_dump()}
+                "hit_run": orch.config.paper.hit_run.model_dump(), "filters": orch.filters_view()}
+
+    @api.put("/setup/filters")
+    async def put_filters(req: FilterSetupRequest) -> dict[str, Any]:
+        changes = req.model_dump(exclude_none=True)
+        news_enabled = changes.pop("news_enabled", None)
+        news_buffer = changes.pop("news_buffer_minutes", None)
+        orch.config.filters = orch.config.filters.model_copy(update=changes)
+        save_local_config("filters", orch.config.filters.model_dump())
+        if news_enabled is not None or news_buffer is not None:
+            sh = orch.config.shields  # shared with the live MarketShields: change it in place
+            if news_enabled is not None:
+                sh.news_blackout_enabled = news_enabled
+            if news_buffer is not None:
+                sh.news_buffer_minutes = news_buffer
+            save_local_config("shields", sh.model_dump())
+        return orch.filters_view()
 
     @api.put("/setup/costs")
     async def put_costs(req: CostSetupRequest) -> dict[str, Any]:

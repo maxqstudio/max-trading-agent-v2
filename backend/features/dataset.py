@@ -6,6 +6,7 @@ import numpy as np
 
 from backend.core.models import Bar, DLPrediction, MarketRegime, Side, TradeSignal
 from backend.features.indicators import IndicatorSnapshot, atr, ema
+from backend.features.htf import alignment, session_of
 
 REGIME_INDEX: dict[MarketRegime, int] = {
     MarketRegime.TRENDING_BULL: 0,
@@ -47,7 +48,14 @@ META_FEATURE_NAMES: list[str] = [
     "dl_prob_against",
     "dl_prob_flat",
     "dl_vol_expansion",
+    # Appended later; models trained before these existed use only the first 24 columns.
+    "htf_m15_align",
+    "htf_h1_align",
+    "session_asia",
+    "session_london",
+    "session_newyork",
 ]
+BASE_META_FEATURES = 24
 
 
 def build_sequence_tensor(bars: list[Bar], seq_len: int = 32, point: float = 0.01) -> np.ndarray | None:
@@ -156,8 +164,11 @@ def extract_meta_features(
     spread_price: float,
     dl_pred: DLPrediction,
     timestamp_sec: int,
+    htf: tuple[int, int] = (0, 0),
+    server_offset_sec: int = 0,
 ) -> np.ndarray:
-    """Extract 24-dim tabular feature vector combining regime, strategy, microstructure & DL probabilities."""
+    """Tabular feature vector: regime, strategy, microstructure, DL probabilities, then the
+    M15/H1 direction (+1 with the trade, -1 against, 0 none) and the trading session."""
     reg_oh = [0.0] * 5
     reg_oh[REGIME_INDEX.get(signal.regime, 2)] = 1.0
 
@@ -194,5 +205,13 @@ def extract_meta_features(
         dl_against,
         dl_pred.prob_flat,
         dl_pred.vol_expansion,
+        float(alignment(side_sign, htf[0])),
+        float(alignment(side_sign, htf[1])),
+    ]
+    sess = session_of(timestamp_sec, server_offset_sec) if timestamp_sec > 0 else "london"
+    vec += [
+        1.0 if sess == "asia" else 0.0,
+        1.0 if sess in ("london", "overlap") else 0.0,
+        1.0 if sess in ("newyork", "overlap") else 0.0,
     ]
     return np.array(vec, dtype=np.float64)

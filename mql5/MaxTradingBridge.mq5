@@ -4,7 +4,7 @@
 //| Zero-DLL Local HTTP/JSON Bridge + Independent Hard Risk Guard    |
 //+------------------------------------------------------------------+
 #property copyright "Max Trading Agent v2"
-#property version   "2.00"
+#property version   "2.10"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -29,6 +29,7 @@ input double   HardMaxSpreadPoints    = 80.0;     // Absolute emergency spread c
 input int      HeartbeatTimeoutSec    = 15;       // Freeze new entries if Python silent
 input int      DefaultOrderTTLMs      = 1500;     // Reject stale commands older than TTL
 input bool     AutoFlattenOnHardDD    = false;    // Flatten all if HardMaxDailyDDPct hit
+input bool     SendNewsCalendar       = true;     // Send high-impact news from the MT5 economic calendar
 
 //--- Globals
 CTrade         g_trade;
@@ -44,6 +45,7 @@ string         g_suffix               = "";
 int            g_lastSyncCode         = 0;
 datetime       g_lastErrorPrint       = 0;
 bool           g_connected            = false;
+datetime       g_lastCalendarPush     = 0;
 
 string BrokerOf(const string logical);  // defined below (auto symbol mapping)
 
@@ -311,6 +313,63 @@ void ExecuteCommand(const string obj) {
 }
 
 //+------------------------------------------------------------------+
+//| Broker server time minus UTC, rounded to 15 minutes              |
+//+------------------------------------------------------------------+
+long ServerUtcOffsetSec() {
+   double diff = (double)(TimeTradeServer() - TimeGMT());
+   return (long)(MathRound(diff / 900.0) * 900.0);
+}
+
+bool HasCurrency(string &list[], const string c) {
+   for(int i = 0; i < ArraySize(list); i++) if(list[i] == c) return true;
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| High-impact news from the MT5 economic calendar (every 15 min)   |
+//| Returns "" when not due or the calendar is unavailable.          |
+//+------------------------------------------------------------------+
+string BuildCalendarJson() {
+   if(!SendNewsCalendar) return "";
+   if(g_lastCalendarPush != 0 && TimeGMT() - g_lastCalendarPush < 900) return "";
+   g_lastCalendarPush = TimeGMT();
+   long offset = ServerUtcOffsetSec();
+   string curr[];
+   for(int i = 0; i < ArraySize(g_logical); i++) {
+      string s = g_logical[i];
+      if(StringLen(s) < 6) continue;
+      string a = StringSubstr(s, 0, 3);
+      string b = StringSubstr(s, 3, 3);
+      if(a != "XAU" && a != "XAG" && !HasCurrency(curr, a)) { int n = ArraySize(curr); ArrayResize(curr, n + 1); curr[n] = a; }
+      if(b != "XAU" && b != "XAG" && !HasCurrency(curr, b)) { int n = ArraySize(curr); ArrayResize(curr, n + 1); curr[n] = b; }
+   }
+   datetime from = TimeTradeServer() - 3600;
+   datetime to   = TimeTradeServer() + 36 * 3600;
+   string items = "";
+   int count = 0;
+   bool anyOk = false;
+   for(int c = 0; c < ArraySize(curr); c++) {
+      MqlCalendarValue vals[];
+      ResetLastError();
+      bool ok = CalendarValueHistory(vals, from, to, NULL, curr[c]);
+      if(!ok) continue;
+      anyOk = true;
+      int n = ArraySize(vals);
+      for(int k = 0; k < n && count < 60; k++) {
+         MqlCalendarEvent ev;
+         if(!CalendarEventById(vals[k].event_id, ev)) continue;
+         if(ev.importance != CALENDAR_IMPORTANCE_HIGH) continue;
+         if(count > 0) items += ",";
+         items += "{\"title\":\"" + EscapeJson(ev.name) + "\",\"currency\":\"" + curr[c] +
+                  "\",\"time_utc\":" + IntegerToString((long)vals[k].time - offset) + ",\"impact\":\"HIGH\"}";
+         count++;
+      }
+   }
+   if(!anyOk) return "";
+   return "\"calendar\":[" + items + "],";
+}
+
+//+------------------------------------------------------------------+
 //| Build BridgeSyncRequest JSON Payload                             |
 //+------------------------------------------------------------------+
 string BuildSyncJson() {
@@ -343,7 +402,9 @@ string BuildSyncJson() {
    j += "\"hard_max_positions\":" + IntegerToString(HardMaxPositions) + ",";
    j += "\"heartbeat_timeout_sec\":" + IntegerToString(HeartbeatTimeoutSec) + ",";
    j += "\"order_ttl_ms\":" + IntegerToString(DefaultOrderTTLMs) + ",";
-   j += "\"ea_version\":\"2.0.0\",\"synced\":true},";
+   j += "\"ea_version\":\"2.1.0\",\"synced\":true},";
+   j += "\"server_utc_offset_sec\":" + IntegerToString(ServerUtcOffsetSec()) + ",";
+   j += BuildCalendarJson();
 
    // Ticks
    j += "\"ticks\":[";
@@ -589,7 +650,7 @@ int OnInit() {
    g_dayStartDate        = TimeGMT();
    g_lastPythonHeartbeat = TimeGMT();
    EventSetMillisecondTimer(SyncIntervalMs);
-   Print("MaxTradingBridge v2.00 initialized. Bridge URL: ", BridgeUrl);
+   Print("MaxTradingBridge v2.10 initialized. Bridge URL: ", BridgeUrl);
    return(INIT_SUCCEEDED);
 }
 
@@ -619,7 +680,7 @@ void OnTimer() {
       g_lastPythonHeartbeat = TimeGMT();
       if(!g_connected) {
          Print("MaxTradingBridge: CONNECTED to robot (", BridgeUrl, ")");
-         Comment("MaxTradingBridge v2.00 | CONNECTED to robot | ", ArraySize(g_logical), " symbols");
+         Comment("MaxTradingBridge v2.10 | CONNECTED to robot | ", ArraySize(g_logical), " symbols");
       }
       g_connected = true;
       string respStr = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
@@ -629,7 +690,7 @@ void OnTimer() {
       if(g_connected || code != g_lastSyncCode || TimeGMT() - g_lastErrorPrint >= 10) {
          string hint = SyncErrorHint(code, err);
          Print("MaxTradingBridge: sync GAGAL (http=", code, ", err=", err, "). ", hint);
-         Comment("MaxTradingBridge v2.00 | NOT CONNECTED (http=", code, ", err=", err, ")\n", hint);
+         Comment("MaxTradingBridge v2.10 | NOT CONNECTED (http=", code, ", err=", err, ")\n", hint);
          g_lastErrorPrint = TimeGMT();
       }
       g_connected = false;

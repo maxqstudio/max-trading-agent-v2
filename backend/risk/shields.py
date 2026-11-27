@@ -30,7 +30,9 @@ class MarketShields:
         self.config = config
         self._spread_history: dict[str, deque[float]] = {}
         self._shock_until_ts: dict[str, int] = {}
-        self._news_events: list[dict] = []
+        self._news_events: list[dict] = []  # from config/news_blackout.json
+        self._live_news: list[dict] = []  # from MT5's economic calendar via the EA
+        self.live_news_updated_ts: int = 0
         self.manual_shock_override: bool = False
         self.reload_news_calendar()
 
@@ -44,6 +46,14 @@ class MarketShields:
             self._news_events = payload.get("events", [])
         except Exception:
             self._news_events = []
+
+    def set_live_news(self, events: list[dict], now_ts: int) -> None:
+        """High-impact events from MT5's calendar: {title, currencies, timestamp_utc}."""
+        self._live_news = events
+        self.live_news_updated_ts = now_ts
+
+    def news_events(self) -> list[dict]:
+        return self._news_events + self._live_news
 
     def record_spread(self, symbol: str, spread_points: float) -> None:
         buf = self._spread_history.setdefault(symbol, deque(maxlen=120))
@@ -101,9 +111,9 @@ class MarketShields:
                 )
 
         # 3. Scheduled high-impact economic news blackout
-        if self.config.news_blackout_enabled and self._news_events:
+        if self.config.news_blackout_enabled and (self._news_events or self._live_news):
             buf_sec = self.config.news_buffer_minutes * 60
-            for ev in self._news_events:
+            for ev in self.news_events():
                 currencies = ev.get("currencies", [])
                 if currencies and not any(c in symbol for c in currencies):
                     continue
@@ -134,8 +144,7 @@ class MarketShields:
                     f"Spread {spread_points:.1f}pt > {self.config.spread_anomaly_multiplier:.1f}x median ({med:.1f}pt)",
                 )
 
-        # 6. Optional London/NY prime session gate (07:00 - 20:00 UTC)
-        if self.config.preferred_sessions_only and not (7 <= now.hour < 20):
-            return ShieldVerdict(False, "OFF_SESSION", f"Outside London/NY session ({now.hour:02d}:00 UTC)")
+        # Sessions are handled by the entry filters (backend/engine/filters.py), after the
+        # No Veto paper book has seen the setup, so the session comparison keeps learning.
 
         return ShieldVerdict(True, "CLEAR", "All market shields green")

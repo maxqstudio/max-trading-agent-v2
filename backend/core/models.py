@@ -176,6 +176,15 @@ class OrderAck(BaseModel):
     timestamp_ms: int = Field(default_factory=utc_now_ms)
 
 
+class CalendarEvent(BaseModel):
+    """High-impact economic calendar event from MT5's built-in calendar (time in UTC)."""
+
+    title: str
+    currency: str
+    time_utc: int  # unix seconds
+    impact: str = "HIGH"
+
+
 class BridgeSyncRequest(BaseModel):
     account: AccountState
     ticks: list[TickSnapshot] = Field(default_factory=list)
@@ -185,6 +194,10 @@ class BridgeSyncRequest(BaseModel):
     acks: list[OrderAck] = Field(default_factory=list)
     hard_guard: MQLHardGuardTelemetry | None = None
     timestamp_ms: int = Field(default_factory=utc_now_ms)
+    # Sent by EA 2.1+: broker server time minus UTC (bar timestamps are server time), and the
+    # next day of high-impact calendar events (None = not refreshed on this sync).
+    server_utc_offset_sec: int | None = None
+    calendar: list[CalendarEvent] | None = None
 
 
 class BridgeSyncResponse(BaseModel):
