@@ -95,7 +95,9 @@ def write_preset(term_dir: Path, token: str) -> Path:
         f"BridgeAuthToken={token}\n"
         "SyncIntervalMs=350\n"
         "LogicalSymbols=XAUUSD,EURUSD,GBPUSD,USDJPY\n"
+        "IncludeChartSymbol=true\n"
         "SymbolSuffix=\n"
+        "SymbolPrefix=\n"
         "HardMaxDailyDDPct=3.50\n"
         "HardMaxLot=0.50\n"
         "HardMaxPositions=4\n",

@@ -217,6 +217,23 @@ class TradingOrchestrator:
             except Exception:
                 pass
 
+    def ensure_symbol(self, sym: str) -> None:
+        """Start tracking a symbol the EA reports that is not in the config watchlist.
+
+        The EA maps broker names (XAUUSD.m, EURUSDm, ...) to plain names and can add the chart's
+        own symbol, so the set of symbols comes from MT5 instead of a fixed list.
+        """
+        if not sym or sym in self.config.instruments.symbols:
+            return
+        self.config.instruments.symbols.append(sym)
+        self.specs.setdefault(sym, DEFAULT_SPECS.get(sym, DEFAULT_SPECS["XAUUSD"]).model_copy(deep=True))
+        self.bars.setdefault(sym, deque(maxlen=600))
+        self.regimes.setdefault(sym, MarketRegime.RANGING)
+        self.dl_preds.setdefault(sym, DLPrediction())
+        self.readiness.setdefault(sym, 35)
+        self.buy_pressure.setdefault(sym, 50)
+        self.shield_status.setdefault(sym, "CLEAR")
+
     async def handle_bridge_sync(self, req: BridgeSyncRequest) -> BridgeSyncResponse:
         """Primary real-time execution heartbeat called by MQL5 EA or Simulator."""
         t0 = time.perf_counter()
@@ -229,7 +246,15 @@ class TradingOrchestrator:
             span = max((self._tick_timestamps[-1] - self._tick_timestamps[0]) / 1000.0, 0.25)
             self.ticks_per_sec = round(len(self._tick_timestamps) / span, 1)
 
+        # 0. Drop data for symbols the broker doesn't offer (an EA asking for "XAUUSD" on an
+        #    "XAUUSD.m" broker gets zeros back); zeros would poison the models and sizing.
+        req.symbol_specs = [sp for sp in req.symbol_specs if sp.point > 0]
+        req.ticks = [t for t in req.ticks if t.bid > 0 and t.ask > 0]
+        req.closed_bars = [b for b in req.closed_bars if b.close > 0 and b.high >= b.low > 0]
+
         # 1. Update specs, account, hard guard
+        for sym in {sp.symbol for sp in req.symbol_specs} | {t.symbol for t in req.ticks} | {b.symbol for b in req.closed_bars}:
+            self.ensure_symbol(sym)
         for sp in req.symbol_specs:
             self.specs[sp.symbol] = sp
         self.account = req.account

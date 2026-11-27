@@ -29,7 +29,7 @@ cd max-trading-agent-v2
 3. **Run Live with MetaTrader 5 (Demo Account First!)**:
    - In MT5: **Tools → Options → Expert Advisors** → check *Allow Algorithmic Trading* + *Allow WebRequest for listed URL* → add `http://127.0.0.1:8765`
    - Double-click **`start_mt5_live.bat`** → opens **`http://127.0.0.1:8765`**
-   - In MT5 Navigator, drag **`MaxTradingBridge`** onto 1 chart (`XAUUSD` M1). Token is already pre-configured! If your broker uses a suffix (e.g., `XAUUSDm`), set `SymbolSuffix = m`.
+   - In MT5 Navigator, drag **`MaxTradingBridge`** onto 1 chart (`XAUUSD` M1). Token is already pre-configured. Broker symbol names are detected automatically (e.g. `XAUUSD.m`, `XAUUSDm`, `pro.XAUUSD`): the EA learns the prefix/suffix from the chart, skips watchlist symbols the broker doesn't offer, and also trades the chart's own symbol. Symbols the EA sends that aren't in `config/default.yaml` are picked up by the backend automatically. If a sync fails, the Experts tab and the chart say why (URL not allowed, wrong token, backend not running).
 
 ## AI Providers (Claude first)
 
