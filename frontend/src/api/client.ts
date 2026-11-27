@@ -104,6 +104,8 @@ export const api = {
   closePosition: (ticket: number) => req<any>(`/api/control/close/${ticket}`, { method: 'POST' }),
   getSetup: () => req<any>('/api/setup'),
   getPaperCompare: () => req<any>('/api/paper/compare'),
+  resetPaper: (reset_learners = true) =>
+    req<any>('/api/paper/reset', { method: 'POST', body: JSON.stringify({ reset_learners }) }),
   saveCosts: (body: Record<string, unknown>) => req<any>('/api/setup/costs', { method: 'PUT', body: JSON.stringify(body) }),
   saveFilters: (body: Record<string, unknown>) => req<any>('/api/setup/filters', { method: 'PUT', body: JSON.stringify(body) }),
   saveExits: (body: Record<string, unknown>) => req<any>('/api/setup/exits', { method: 'PUT', body: JSON.stringify(body) }),
@@ -113,6 +115,7 @@ export const api = {
   testLlm: (provider?: string) => req<any>('/api/setup/llm/test', { method: 'POST', body: JSON.stringify({ provider }) }),
   saveSupervisorSetup: (body: Record<string, unknown>) =>
     req<any>('/api/setup/supervisor', { method: 'PUT', body: JSON.stringify(body) }),
+  refreshSupervisorBrief: () => req<any>('/api/setup/supervisor/brief', { method: 'POST' }),
   triggerDemoSignal: (symbol: string) =>
     req<any>(`/api/demo/signal?symbol=${encodeURIComponent(symbol)}`, { method: 'POST' }),
 };

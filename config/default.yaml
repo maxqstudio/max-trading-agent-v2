@@ -32,6 +32,7 @@ risk:
   max_concurrent_positions: 3
   max_usd_correlated_positions: 2
   max_spread_atr_ratio: 0.30
+  max_cost_to_risk_ratio: 0.18
   consecutive_loss_limit: 3
   consecutive_loss_cooldown_min: 15
   min_rr_ratio: 1.25
@@ -144,11 +145,32 @@ evolution:
   rollback_min_trades: 8
   wfo_trials: 12
 
-# Claude veto layer (needs an LLM provider in .env; without one it is simply off)
+exits:
+  be_at_r: 0.85
+  be_offset_r: 0.08
+  trail_start_r: 1.25
+  trail_dist_r: 0.55
+  adaptive: true
+  adaptive_min_samples: 20
+
+filters:
+  htf_mode: "auto"
+  htf_timeframe: "BOTH"
+  trend_strategies_require_htf: true
+  block_breakout_in_ranging: true
+  session_mode: "auto"
+  blocked_sessions: ["asia", "late"]
+  ichimoku_mode: "auto"
+  ichimoku_threshold: 3
+  min_samples: 30
+
+# AI Supervisor veto layer (needs an LLM provider in .env; without one it is simply off)
 supervisor:
   enabled: true
+  mode: "periodic"          # periodic = 0ms desk brief every N min (no M1 stale drift) | hybrid | per_trade
+  brief_interval_min: 15
   timeout_s: 6.0            # M1 scalping: answer must come back fast
-  use_fast_model: true      # ANTHROPIC_FAST_MODEL (default claude-haiku-5-5)
+  use_fast_model: true      # Uses the active provider's fast model
   effort: "low"
   on_unavailable: "block"   # block = skip trade if LLM slow/down/over budget | allow = trade without veto
   max_calls_per_hour: 120

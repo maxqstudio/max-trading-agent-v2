@@ -31,6 +31,7 @@ class ProfitLock:
 class NetTake:
     min_net_profit: float = 1.0  # close once the net profit (after all costs) reaches this much money
     commission_per_lot: float = 7.0  # round-trip estimate, used when the real commission is unknown
+    min_cost_multiple: float = 0.0  # when > 0, require net profit >= min_cost_multiple * (commission + spread)
 
 
 def net_take(
@@ -40,13 +41,16 @@ def net_take(
     volume: float,
     swap: float = 0.0,
     commission: float | None = None,
+    spread_money: float = 0.0,
 ) -> tuple[bool, float]:
     """(take_now, net_money). ``gross_money`` must already be valued at the closing side
     (bid for a buy, ask for a sell), so the spread is included. ``commission`` is the round-trip
     commission in money (positive); None uses the per-lot estimate."""
     costs = abs(commission) if commission is not None else policy.commission_per_lot * volume
     net = round(gross_money + swap - costs, 2)
-    return net >= max(policy.min_net_profit, 0.01), net
+    total_friction = costs + max(spread_money, 0.0)
+    floor = max(policy.min_net_profit, policy.min_cost_multiple * total_friction, 0.01)
+    return net >= floor, net
 
 
 def _price(side: Side, entry: float, r: float, risk: float) -> float:
@@ -84,10 +88,11 @@ def evaluate(
     peak_r: float,
     sl: float,
     spread_px: float = 0.0,
+    commission_px: float = 0.0,
 ) -> tuple[Action, float]:
     """Return (action, new_sl). ``peak_r`` is the best open profit so far in R (MFE)."""
     risk = max(risk, 1e-12)
-    cost = spread_px  # breakeven must cover the spread paid on entry
+    cost = max(spread_px, 0.0) + max(commission_px, 0.0)  # breakeven must cover spread + round-trip commission
     if peak_r < policy.be_at_r:
         return "HOLD", sl
     lock_r = policy.be_offset_r + cost / risk

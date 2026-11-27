@@ -5,9 +5,14 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter
+from pydantic import BaseModel
 
 from backend.core.models import TradeRecord
 from backend.engine.orchestrator import PAPER_BOOKS, PAPER_LABELS, TradingOrchestrator
+
+
+class PaperResetRequest(BaseModel):
+    reset_learners: bool = True
 
 
 def summarize(trades: list[TradeRecord], start_equity: float) -> dict[str, Any]:
@@ -67,7 +72,7 @@ def register_paper_routes(api: APIRouter, orch: TradingOrchestrator) -> None:
         return {
             "rows": rows,
             "ai_cost_today_usd": ai_cost,
-            "note": "Normal and Hit & Run use the same setups (passed risk and supervisor). No Veto opens every setup that passed risk, including the ones Claude rejected.",
+            "note": "Normal and Hit & Run use the same setups (passed risk and supervisor). No Veto opens every setup that passed risk, including the ones AI Supervisor rejected.",
             "learning": {
                 "adaptive": orch.config.exits.adaptive,
                 "min_samples": orch.exit_selector.min_samples,
@@ -77,3 +82,8 @@ def register_paper_routes(api: APIRouter, orch: TradingOrchestrator) -> None:
             "hitrun_learning": orch.hitrun_learning(),
             "settings": {"exits": orch.config.exits.model_dump(), "hit_run": orch.config.paper.hit_run.model_dump()},
         }
+
+    @api.post("/paper/reset")
+    async def reset_paper(req: PaperResetRequest | None = None) -> dict[str, Any]:
+        reset_learners = True if req is None else req.reset_learners
+        return await orch.reset_paper_books(reset_learners=reset_learners)

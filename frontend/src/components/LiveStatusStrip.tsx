@@ -72,9 +72,18 @@ export const LiveStatusStrip: React.FC<{ state: LiveStateSnapshot | null; onDemo
         {llm?.enabled ? `${llm.provider} · ${llm.fast_model}${llm.fallbacks.length ? ` (+${llm.fallbacks.length} fallback)` : ''}` : 'not set (open Setup)'}
       </Chip>
 
-      <Chip icon={Gavel} label="SUPERVISOR" tone={supTone} title="Claude decisions today: approve / reduce / reject / unreachable">
+      <Chip
+        icon={Gavel}
+        label="SUPERVISOR"
+        tone={supTone}
+        title={
+          sup?.brief_summary
+            ? `Desk Brief (${sup.mode || 'periodic'}): ${sup.brief_summary}`
+            : 'AI Supervisor decisions today: approve / reduce / reject / unreachable'
+        }
+      >
         {sup?.active
-          ? `✓${sup.approve} ↓${sup.reduce} ✗${sup.reject}${sup.unavailable ? ` ⚠${sup.unavailable}` : ''} · $${sup.spent_today_usd.toFixed(2)}/$${sup.daily_budget_usd.toFixed(0)}`
+          ? `${sup.mode === 'periodic' ? 'BRIEF' : sup.mode === 'hybrid' ? 'HYBRID' : 'VETO'} · ✓${sup.approve} ↓${sup.reduce} ✗${sup.reject}${sup.unavailable ? ` ⚠${sup.unavailable}` : ''} · $${sup.spent_today_usd.toFixed(2)}/$${sup.daily_budget_usd.toFixed(0)}`
           : 'off'}
       </Chip>
 

@@ -24,6 +24,7 @@ HTF_BUCKETS = ("with", "neutral", "against")
 HTF_TIMEFRAMES = ("M15", "H1", "BOTH")
 ICHI_BUCKETS = ("with", "mixed", "against")
 ICHI_THRESHOLDS = (2, 3, 4)  # stats are kept for each, so changing the setting keeps its history
+TREND_STRATEGIES = frozenset({"micro_breakout", "ema_vwap_pullback", "tick_imbalance"})
 
 
 def htf_bucket(m15: int, h1: int, timeframe: str) -> str:
@@ -139,8 +140,19 @@ def decide(
     ichimoku_mode: str = "off",
     ichi: int = 0,
     ichi_threshold: int = 3,
+    strategy_id: str = "",
+    regime: str = "",
+    trend_strategies_require_htf: bool = False,
+    block_breakout_in_ranging: bool = False,
 ) -> FilterDecision:
+    if block_breakout_in_ranging and strategy_id == "micro_breakout" and regime == "RANGING":
+        return FilterDecision("BREAKOUT_IN_RANGE", "Micro Breakout blocked inside RANGING chop")
     bucket = htf_bucket(m15, h1, htf_timeframe)
+    if trend_strategies_require_htf and strategy_id in TREND_STRATEGIES and bucket == "against":
+        return FilterDecision(
+            "HTF_TREND_AGAINST",
+            f"Trend strategy {strategy_id} blocked against the {htf_timeframe} direction",
+        )
     if bucket == "against" and htf_mode != "off":
         if htf_mode == "on":
             return FilterDecision("HTF_AGAINST", f"Against the {htf_timeframe} direction")

@@ -1,0 +1,404 @@
+from __future__ import annotations
+
+import time
+
+import pytest
+
+from backend.core.config import EnvSettings, RiskConfig, TradingConfig
+from backend.core.models import (
+    AccountState,
+    Bar,
+    BridgeSyncRequest,
+    MarketRegime,
+    Side,
+    SymbolSpec,
+    TickSnapshot,
+    TradeRecord,
+    TradeSignal,
+)
+from backend.engine.exit_policy import NetTake, ProfitLock, evaluate, net_take
+from backend.engine.filters import FilterLearner, decide
+from backend.engine.orchestrator import PAPER_VERSION, TradingOrchestrator
+from backend.engine.supervisor import SupervisorSettings, TradeSupervisor
+from backend.llm.base import LLMRequest, LLMResult
+from backend.llm.presets import PRESETS
+from backend.llm.router import LLMRouter
+from backend.llm.settings import ResolvedProvider
+from backend.risk.manager import PortfolioRiskManager
+from backend.storage.database import Database
+
+
+def _eurusd_spec() -> SymbolSpec:
+    return SymbolSpec(
+        symbol="EURUSD",
+        broker_symbol="EURUSD",
+        digits=5,
+        point=0.00001,
+        tick_size=0.00001,
+        tick_value=1.0,
+        volume_min=0.01,
+        volume_max=50.0,
+        volume_step=0.01,
+        stops_level=10,
+        commission_per_lot=14.0,
+    )
+
+
+def _xau_spec() -> SymbolSpec:
+    return SymbolSpec(
+        symbol="XAUUSD",
+        broker_symbol="XAUUSD",
+        digits=2,
+        point=0.01,
+        tick_size=0.01,
+        tick_value=1.0,
+        volume_min=0.01,
+        volume_max=50.0,
+        volume_step=0.01,
+        stops_level=20,
+        commission_per_lot=7.0,
+    )
+
+
+def test_cost_to_risk_gate_blocks_tight_sl_high_commission():
+    cfg = RiskConfig(risk_per_trade_pct=0.5, max_spread_atr_ratio=0.35, max_cost_to_risk_ratio=0.18)
+    rm = PortfolioRiskManager(cfg)
+    spec = _eurusd_spec()
+    acct = AccountState(balance=10000, equity=10000, day_start_equity=10000)
+
+    # Real EURUSD failure case: 2.4 pip SL + $14/lot commission (= 1.4 pip) + 0.3 pip spread = 1.7 / 2.4 = 71% > 18%
+    tight_sig = TradeSignal(
+        symbol="EURUSD",
+        strategy_id="micro_breakout",
+        side=Side.BUY,
+        entry_price=1.08500,
+        sl_price=1.08476,
+        tp_price=1.08550,
+        atr=0.00020,
+        regime=MarketRegime.TRENDING_BULL,
+        confidence=0.75,
+        reason="tight scalp",
+    )
+    dec_tight = rm.evaluate_entry(
+        tight_sig,
+        acct,
+        open_positions=[],
+        spec=spec,
+        spread_points=3.0,
+        ml_probability=0.65,
+        bandit_weight=0.5,
+        now_ts=1700000000,
+        commission_per_lot=14.0,
+    )
+    assert not dec_tight.approved
+    assert dec_tight.reason_code == "COST_TO_RISK_GATE"
+
+    # Healthy 12-pip SL: (0.3 pip spread + 1.4 pip comm) / 12 pip = 14.2% <= 18% -> approved!
+    wide_sig = TradeSignal(
+        symbol="EURUSD",
+        strategy_id="structure_shift",
+        side=Side.BUY,
+        entry_price=1.08500,
+        sl_price=1.08380,
+        tp_price=1.08700,
+        atr=0.00080,
+        regime=MarketRegime.TRENDING_BULL,
+        confidence=0.75,
+        reason="healthy structural stop",
+    )
+    dec_wide = rm.evaluate_entry(
+        wide_sig,
+        acct,
+        open_positions=[],
+        spec=spec,
+        spread_points=3.0,
+        ml_probability=0.65,
+        bandit_weight=0.5,
+        now_ts=1700000000,
+        commission_per_lot=14.0,
+    )
+    assert dec_wide.approved
+    assert dec_wide.volume > 0
+
+
+def test_commission_aware_profit_lock_breakeven_never_nets_negative():
+    policy = ProfitLock(be_at_r=0.85, be_offset_r=0.08, trail_start_r=1.25, trail_dist_r=0.55)
+    entry = 1.08500
+    risk = 0.00100  # 10 pips
+    spread_px = 0.00004  # 0.4 pip
+    comm_px = 0.00014  # $14/lot on EURUSD = 1.4 pips
+
+    # Before +0.85R: HOLD (no premature choke at +0.5R!)
+    act_hold, _ = evaluate(
+        policy,
+        side=Side.BUY,
+        entry=entry,
+        risk=risk,
+        price=entry + 0.65 * risk,
+        peak_r=0.65,
+        sl=entry - risk,
+        spread_px=spread_px,
+        commission_px=comm_px,
+    )
+    assert act_hold == "HOLD"
+
+    # At +0.90R: BE stop must clear entry + spread_px + comm_px + offset
+    act_be, new_sl = evaluate(
+        policy,
+        side=Side.BUY,
+        entry=entry,
+        risk=risk,
+        price=entry + 0.90 * risk,
+        peak_r=0.90,
+        sl=entry - risk,
+        spread_px=spread_px,
+        commission_px=comm_px,
+    )
+    assert act_be == "MOVE_SL"
+    assert new_sl >= entry + spread_px + comm_px + 0.08 * risk - 1e-9
+
+    # Mirror check for SELL
+    act_sell, sell_sl = evaluate(
+        policy,
+        side=Side.SELL,
+        entry=entry,
+        risk=risk,
+        price=entry - 0.90 * risk,
+        peak_r=0.90,
+        sl=entry + risk,
+        spread_px=spread_px,
+        commission_px=comm_px,
+    )
+    assert act_sell == "MOVE_SL"
+    assert sell_sl <= entry - (spread_px + comm_px + 0.08 * risk) + 1e-9
+
+
+def test_hitrun_cost_multiple_profit_floor():
+    rule = NetTake(min_net_profit=1.0, commission_per_lot=14.0, min_cost_multiple=2.0)
+    # 0.10 lot -> comm = $1.40, spread = $1.10 -> total friction = $2.50 -> required net >= $5.00
+    take_small, net_small = net_take(rule, gross_money=3.0, volume=0.10, spread_money=1.10)
+    assert not take_small
+    assert round(net_small, 2) == 1.60
+
+    take_big, net_big = net_take(rule, gross_money=6.60, volume=0.10, spread_money=1.10)
+    assert take_big
+    assert round(net_big, 2) == 5.20
+
+
+def test_htf_trend_guard_and_ranging_breakout_guard():
+    learner = FilterLearner(min_samples=30)  # 0 samples so auto mode wouldn't block on its own
+
+    # 1. Trend strategy against M15 HTF -> immediately blocked by HTF_TREND_AGAINST
+    d_trend_against = decide(
+        learner,
+        htf_mode="auto",
+        htf_timeframe="M15",
+        session_mode="auto",
+        blocked_sessions=["asia"],
+        m15=-1,
+        h1=-1,
+        session="london",
+        strategy_id="ema_vwap_pullback",
+        regime="TRENDING_UP",
+        trend_strategies_require_htf=True,
+        block_breakout_in_ranging=True,
+    )
+    assert d_trend_against.code == "HTF_TREND_AGAINST"
+
+    # 2. Reversal strategy against HTF -> allowed (reversal is exempt from trend guard!)
+    d_rev = decide(
+        learner,
+        htf_mode="auto",
+        htf_timeframe="M15",
+        session_mode="auto",
+        blocked_sessions=["asia"],
+        m15=-1,
+        h1=-1,
+        session="london",
+        strategy_id="liquidity_sweep",
+        regime="RANGING",
+        trend_strategies_require_htf=True,
+        block_breakout_in_ranging=True,
+    )
+    assert d_rev.code == ""
+
+    # 3. Micro breakout in RANGING regime -> blocked by BREAKOUT_IN_RANGE even when HTF agrees
+    d_range_bo = decide(
+        learner,
+        htf_mode="auto",
+        htf_timeframe="M15",
+        session_mode="auto",
+        blocked_sessions=["asia"],
+        m15=1,
+        h1=1,
+        session="london",
+        strategy_id="micro_breakout",
+        regime="RANGING",
+        trend_strategies_require_htf=True,
+        block_breakout_in_ranging=True,
+    )
+    assert d_range_bo.code == "BREAKOUT_IN_RANGE"
+
+
+class _FakeDeskBriefProvider:
+    name = "fake"
+
+    def __init__(self, payload: dict) -> None:
+        self.payload = payload
+        self.calls = 0
+
+    async def complete(self, req: LLMRequest) -> LLMResult:
+        self.calls += 1
+        return LLMResult(
+            data=self.payload,
+            provider="fake",
+            model="fake-fast",
+            latency_ms=42.0,
+            cost_usd=0.001,
+        )
+
+
+@pytest.mark.asyncio
+async def test_periodic_desk_brief_zero_latency_and_hybrid_routing():
+    fake = _FakeDeskBriefProvider(
+        {
+            "market_summary": "Gold bullish impulse, EUR choppy pre-CPI",
+            "symbols": [
+                {"symbol": "XAUUSD", "bias": "LONG_ONLY", "risk_multiplier": 1.0, "avoid_strategies": [], "note": "Clean uptrend"},
+                {"symbol": "EURUSD", "bias": "FLAT", "risk_multiplier": 0.0, "avoid_strategies": [], "note": "High chop"},
+                {
+                    "symbol": "GBPUSD",
+                    "bias": "BOTH",
+                    "risk_multiplier": 0.5,
+                    "avoid_strategies": ["micro_breakout"],
+                    "note": "Half size only",
+                },
+            ],
+        }
+    )
+    rp = ResolvedProvider(
+        preset=PRESETS["anthropic"],
+        api_key="test-key",
+        model="m",
+        fast_model="m-fast",
+        base_url="http://localhost",
+        fallback_models=(),
+    )
+    router = LLMRouter(resolved=[rp], factory=lambda _rp: fake)
+    sup = TradeSupervisor(router, SupervisorSettings(enabled=True, mode="periodic", brief_interval_min=15))
+
+    # Routing checks
+    assert not sup.uses_per_trade_review("micro_breakout")
+    assert not sup.uses_per_trade_review("structure_shift")
+    sup.settings.mode = "hybrid"
+    assert not sup.uses_per_trade_review("micro_breakout")
+    assert sup.uses_per_trade_review("structure_shift")
+    sup.settings.mode = "periodic"
+
+    # Refresh once (1 LLM call)
+    brief = await sup.refresh_brief("Multi-symbol desk digest:{}")
+    assert fake.calls == 1
+    assert set(brief.keys()) == {"XAUUSD", "EURUSD", "GBPUSD"}
+    assert not sup.brief_is_due()
+
+    # Evaluate multiple signals at 0ms with 0 extra LLM calls
+    v1 = sup.evaluate_from_brief(symbol="XAUUSD", side=Side.BUY, strategy_id="ema_vwap_pullback")
+    assert v1.decision == "APPROVE" and v1.size_multiplier == 1.0
+
+    v2 = sup.evaluate_from_brief(symbol="XAUUSD", side=Side.SELL, strategy_id="ema_vwap_pullback")
+    assert v2.decision == "REJECT" and v2.size_multiplier == 0.0
+
+    v3 = sup.evaluate_from_brief(symbol="EURUSD", side=Side.BUY, strategy_id="liquidity_sweep")
+    assert v3.decision == "REJECT"
+
+    v4 = sup.evaluate_from_brief(symbol="GBPUSD", side=Side.BUY, strategy_id="liquidity_sweep")
+    assert v4.decision == "REDUCE" and v4.size_multiplier == 0.5
+
+    v5 = sup.evaluate_from_brief(symbol="GBPUSD", side=Side.BUY, strategy_id="micro_breakout")
+    assert v5.decision == "REJECT"
+
+    assert fake.calls == 1  # Zero LLM calls during entry evaluation!
+
+
+@pytest.mark.asyncio
+async def test_history_bars_backfill_and_clean_paper_reset(tmp_path):
+    cfg = TradingConfig()
+    cfg.app.database_path = str(tmp_path / "test.db")
+    cfg.app.snapshots_dir = str(tmp_path / "snaps")
+    cfg.app.kill_switch_path = str(tmp_path / "kill.json")
+    cfg.evolution.auto_warmup_on_backfill = False  # don't run full WFO in unit test
+    env = EnvSettings(bridge_auth_token="a" * 32, control_api_token="b" * 32)
+
+    db = Database(cfg.app.database_path)
+    await db.connect()
+    try:
+        orch = TradingOrchestrator(cfg, env, db, llm_router=LLMRouter(resolved=[]))
+        await orch.initialize_from_storage()
+
+        base_ts = int(time.time()) - 6000
+        # Send out-of-order + duplicate historical bars via history_bars
+        hist = [
+            Bar(
+                symbol="XAUUSD",
+                timeframe="M1",
+                timestamp=base_ts + i * 60,
+                open=2650 + i * 0.1,
+                high=2650.5 + i * 0.1,
+                low=2649.5 + i * 0.1,
+                close=2650.2 + i * 0.1,
+                volume=100,
+                spread_points=18,
+            )
+            for i in [5, 2, 0, 3, 1, 4, 2]
+        ]
+        req = BridgeSyncRequest(
+            account=AccountState(balance=10000, equity=10000, day_start_equity=10000, is_demo=True),
+            symbol_specs=[_xau_spec()],
+            ticks=[TickSnapshot(symbol="XAUUSD", bid=2651.0, ask=2651.2, spread_points=20, timestamp_ms=int(time.time() * 1000))],
+            history_bars=hist,
+        )
+        resp = await orch.handle_bridge_sync(req)
+        assert resp.commands == []  # backfill never fires live orders
+        stored_ts = [b.timestamp for b in orch.bars["XAUUSD"]]
+        assert stored_ts == sorted(set(stored_ts))
+        assert len(stored_ts) == 6
+
+        # Seed one paper trade and one real MT5 trade, then call reset_paper_books
+        now_s = int(time.time())
+        paper_tr = TradeRecord(
+            is_shadow=False,
+            version_id=PAPER_VERSION,
+            symbol="XAUUSD",
+            strategy_id="micro_breakout",
+            regime=MarketRegime.RANGING,
+            side=Side.BUY,
+            volume=0.1,
+            entry_price=2650.0,
+            exit_price=2648.0,
+            sl_price=2648.0,
+            tp_price=2654.0,
+            open_time=now_s - 120,
+            close_time=now_s - 60,
+            pnl_money=-20.0,
+            pnl_r=-1.0,
+            exit_reason="SL",
+        )
+        live_tr = paper_tr.model_copy(
+            update={"trade_id": "mt5-real-1", "version_id": "v1.0", "pnl_money": 45.0, "pnl_r": 1.5, "exit_reason": "TP"}
+        )
+        await db.save_trade(paper_tr)
+        await db.save_trade(live_tr)
+        orch.paper_books["normal"].equity = 9400.0
+        orch.veto_stats = {"APPROVE": {"n": 10, "wins": 4, "sum_r": -2.0, "sum_money": -100.0}}
+
+        res = await orch.reset_paper_books(reset_learners=True)
+        assert res["cleared_trades"] == 1
+        assert orch.paper_books["normal"].equity == cfg.paper.start_equity
+        assert orch.veto_stats == {}
+        remaining = await db.list_trades(limit=50)
+        assert [t.trade_id for t in remaining] == ["mt5-real-1"]
+        # Market bars are still preserved in DB!
+        db_bars = await db.load_recent_bars("XAUUSD", "M1", limit=100)
+        assert len(db_bars) == 6
+    finally:
+        await db.close()

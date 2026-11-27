@@ -4,7 +4,7 @@
 //| Zero-DLL Local HTTP/JSON Bridge + Independent Hard Risk Guard    |
 //+------------------------------------------------------------------+
 #property copyright "Max Trading Agent v2"
-#property version   "2.10"
+#property version   "2.20"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -14,7 +14,9 @@
 input string   BridgeUrl              = "http://127.0.0.1:8765/api/bridge/sync";
 input string   BridgeAuthToken        = "";      // Filled in by setup_and_test.bat (never commit a real token)
 input int      SyncIntervalMs         = 350;      // Fast poll interval (ms)
-input int      WebTimeoutMs           = 1200;     // HTTP timeout (ms)
+input int      WebTimeoutMs           = 2000;     // HTTP timeout (ms)
+input int      BackfillBars           = 3000;     // Startup M1 history bars (~2+ days) for HTF/Ichimoku/DL warmup
+input int      BackfillChunkSize      = 300;      // Historical bars per sync tick (non-blocking chunked backfill)
 input string   LogicalSymbols         = "XAUUSD,EURUSD,GBPUSD,USDJPY"; // Watchlist (plain names). Missing ones are skipped
 input bool     IncludeChartSymbol     = true;     // Also trade the symbol of the chart the EA is on
 input string   SymbolSuffix           = "";       // Leave empty = auto-detect (e.g. ".m", "m", ".pro")
@@ -36,6 +38,7 @@ CTrade         g_trade;
 string         g_logical[];
 string         g_broker[];
 datetime       g_lastBarTime[];
+int            g_backfillRemaining[];
 datetime       g_dayStartDate         = 0;
 double         g_dayStartEquity       = 0.0;
 datetime       g_lastPythonHeartbeat  = 0;
@@ -402,7 +405,7 @@ string BuildSyncJson() {
    j += "\"hard_max_positions\":" + IntegerToString(HardMaxPositions) + ",";
    j += "\"heartbeat_timeout_sec\":" + IntegerToString(HeartbeatTimeoutSec) + ",";
    j += "\"order_ttl_ms\":" + IntegerToString(DefaultOrderTTLMs) + ",";
-   j += "\"ea_version\":\"2.1.0\",\"synced\":true},";
+   j += "\"ea_version\":\"2.2.0\",\"synced\":true},";
    j += "\"server_utc_offset_sec\":" + IntegerToString(ServerUtcOffsetSec()) + ",";
    j += BuildCalendarJson();
 
@@ -423,14 +426,14 @@ string BuildSyncJson() {
    }
    j += "],";
 
-   // Closed M1 Bars (initial 80 bars on first push, then newly closed bars)
+   // Closed M1 Bars (live newly closed bars only — never fire entries on old backfill!)
    j += "\"closed_bars\":[";
    bool firstBar = true;
    for(int i = 0; i < nSym; i++) {
       string bs = g_broker[i];
       int digs  = (int)SymbolInfoInteger(bs, SYMBOL_DIGITS);
       MqlRates rates[];
-      int countReq = (g_lastBarTime[i] == 0) ? 80 : 3;
+      int countReq = (g_lastBarTime[i] == 0) ? 5 : 3;
       int copied = CopyRates(bs, PERIOD_M1, 1, countReq, rates);
       if(copied <= 0) continue;
       ArraySetAsSeries(rates, false);
@@ -447,6 +450,36 @@ string BuildSyncJson() {
               ",\"spread_points\":" + IntegerToString(rates[k].spread) + "}";
          g_lastBarTime[i] = rates[k].time;
       }
+   }
+   j += "],";
+
+   // Chunked Startup Historical M1 Backfill (populates H1/M15 Ichimoku, Yesterday Range, and DL/ML instantly)
+   j += "\"history_bars\":[";
+   bool firstHist = true;
+   int chunkBudget = BackfillChunkSize > 0 ? BackfillChunkSize : 300;
+   for(int i = 0; i < nSym; i++) {
+      if(g_backfillRemaining[i] <= 0) continue;
+      string bs = g_broker[i];
+      int digs  = (int)SymbolInfoInteger(bs, SYMBOL_DIGITS);
+      int take  = MathMin(g_backfillRemaining[i], chunkBudget);
+      int startShift = g_backfillRemaining[i] - take + 1; // shift 1 = latest closed bar
+      MqlRates hRates[];
+      int copied = CopyRates(bs, PERIOD_M1, startShift, take, hRates);
+      g_backfillRemaining[i] -= take;
+      if(copied <= 0) continue;
+      ArraySetAsSeries(hRates, false);
+      for(int k = 0; k < copied; k++) {
+         if(!firstHist) j += ",";
+         firstHist = false;
+         j += "{\"symbol\":\"" + g_logical[i] + "\",\"timeframe\":\"M1\",\"timestamp\":" + IntegerToString((long)hRates[k].time) +
+              ",\"open\":" + DoubleToString(hRates[k].open, digs) +
+              ",\"high\":" + DoubleToString(hRates[k].high, digs) +
+              ",\"low\":" + DoubleToString(hRates[k].low, digs) +
+              ",\"close\":" + DoubleToString(hRates[k].close, digs) +
+              ",\"volume\":" + IntegerToString((long)hRates[k].tick_volume) +
+              ",\"spread_points\":" + IntegerToString(hRates[k].spread) + "}";
+      }
+      break; // one symbol chunk per 350ms tick keeps every HTTP request fast & compact
    }
    j += "],";
 
@@ -606,9 +639,11 @@ void AddSymbol(const string logical, const string broker) {
    ArrayResize(g_logical, n + 1);
    ArrayResize(g_broker, n + 1);
    ArrayResize(g_lastBarTime, n + 1);
+   ArrayResize(g_backfillRemaining, n + 1);
    g_logical[n] = logical;
    g_broker[n] = broker;
    g_lastBarTime[n] = 0;
+   g_backfillRemaining[n] = MathMax(0, BackfillBars);
    SymbolSelect(broker, true);
 }
 
@@ -636,6 +671,7 @@ int OnInit() {
    ArrayResize(g_logical, 0);
    ArrayResize(g_broker, 0);
    ArrayResize(g_lastBarTime, 0);
+   ArrayResize(g_backfillRemaining, 0);
    if(IncludeChartSymbol) AddSymbol(StripAffixes(_Symbol), _Symbol);
    for(int i = 0; i < n; i++) {
       if(watch[i] == "") continue;

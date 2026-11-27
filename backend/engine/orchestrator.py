@@ -118,6 +118,8 @@ def _supervisor_settings(cfg: TradingConfig) -> SupervisorSettings:
     sc = cfg.supervisor
     return SupervisorSettings(
         enabled=sc.enabled,
+        mode=sc.mode,
+        brief_interval_min=sc.brief_interval_min,
         timeout_s=sc.timeout_s,
         use_fast_model=sc.use_fast_model,
         effort=sc.effort,
@@ -218,6 +220,9 @@ class TradingOrchestrator:
         self.ws_clients: set[Any] = set()
         self.alert_callback: Any | None = None
         self.evolution_running: bool = False
+        self._warmup_triggered: bool = False
+        self._brief_refreshing: bool = False
+        self._bg_tasks: set[asyncio.Task] = set()
         self._last_eq_record_ms: int = 0
 
     async def initialize_from_storage(self) -> None:
@@ -359,9 +364,15 @@ class TradingOrchestrator:
         req.symbol_specs = [sp for sp in req.symbol_specs if sp.point > 0]
         req.ticks = [t for t in req.ticks if t.bid > 0 and t.ask > 0]
         req.closed_bars = [b for b in req.closed_bars if b.close > 0 and b.high >= b.low > 0]
+        req.history_bars = [b for b in req.history_bars if b.close > 0 and b.high >= b.low > 0]
 
         # 1. Update specs, account, hard guard
-        for sym in {sp.symbol for sp in req.symbol_specs} | {t.symbol for t in req.ticks} | {b.symbol for b in req.closed_bars}:
+        for sym in (
+            {sp.symbol for sp in req.symbol_specs}
+            | {t.symbol for t in req.ticks}
+            | {b.symbol for b in req.closed_bars}
+            | {b.symbol for b in req.history_bars}
+        ):
             self.ensure_symbol(sym)
         for sp in req.symbol_specs:
             self.specs[sp.symbol] = sp
@@ -474,6 +485,22 @@ class TradingOrchestrator:
             await self._update_shadow_positions_on_tick(tk, now_sec)
             await self._update_paper_positions_on_tick(tk, now_sec)
 
+        # 4b. Ingest startup historical backfill bars (buffer & DB only — never fire live trades on old bars!)
+        if req.history_bars:
+            await self.db.save_bars(req.history_bars)
+            by_sym: dict[str, list[Bar]] = {}
+            for hb in req.history_bars:
+                by_sym.setdefault(hb.symbol, []).append(hb)
+            for sym, new_hist in by_sym.items():
+                buf = self.bars.setdefault(sym, deque(maxlen=BAR_BUFFER))
+                merged = {b.timestamp: b for b in buf}
+                for hb in new_hist:
+                    merged[hb.timestamp] = hb
+                ordered = [merged[k] for k in sorted(merged.keys())][-BAR_BUFFER:]
+                buf.clear()
+                buf.extend(ordered)
+            self._last_backfill_ts = time.monotonic()
+
         # 5. Ingest newly closed bars & run full 4-Pillar AI scan on closed bars
         if req.closed_bars:
             await self.db.save_bars(req.closed_bars)
@@ -482,6 +509,9 @@ class TradingOrchestrator:
                 if not buf or bar.timestamp > buf[-1].timestamp:
                     buf.append(bar)
                 await self._evaluate_symbol_on_bar_close(bar, now_sec)
+
+        # 5b. Auto-train DL/ML once startup backfill finishes streaming (or enough live bars accumulate)
+        self._maybe_trigger_auto_warmup()
 
         # 6. Run RL-2 Dynamic Exit management on all open live positions
         if self.config.ai.rl_exit_enabled and not self.risk.killed:
@@ -623,7 +653,7 @@ class TradingOrchestrator:
             )
             return
 
-        # Portfolio Risk Guard & Broker-Spec Position Sizing
+        # Portfolio Risk Guard & Broker-Spec Position Sizing (uses real learned broker commission!)
         risk_dec = self.risk.evaluate_entry(
             signal=best_sig,
             account=self.account,
@@ -633,6 +663,7 @@ class TradingOrchestrator:
             ml_probability=ml_prob,
             bandit_weight=b_weight,
             now_ts=now_sec,
+            commission_per_lot=self.paper_costs(sym)["commission_per_lot"],
         )
         if not risk_dec.approved:
             self.active_thought = f"{sym} {best_sig.strategy_id} blocked by Risk Guard ({risk_dec.reason_code})"
@@ -652,14 +683,15 @@ class TradingOrchestrator:
         reviewed = self.supervisor.active and (
             self.config.app.trading_mode != TradingMode.SHADOW_ONLY or self.config.supervisor.review_in_shadow
         )
-        if self.config.paper.enabled and not (reviewed and sym in self._supervising):
+        per_trade_llm = reviewed and self.supervisor.uses_per_trade_review(best_sig.strategy_id)
+        if self.config.paper.enabled and not (per_trade_llm and sym in self._supervising):
             # Every risk-approved setup, before (and regardless of) the supervisor's verdict.
             await self._open_paper_position(
                 sym, best_sig, risk_dec, assess, spec, ml_prob, dl_align, spread_pts,
                 books=("raw",), veto="PENDING" if reviewed else "NONE", context=entry_ctx,
             )
-        # Direction and session filters: after the No Veto book, so it keeps seeing every setup.
-        block = self._entry_filter(entry_ctx)
+        # Direction, regime and session filters: after the No Veto book, so it keeps seeing every setup.
+        block = self._entry_filter(entry_ctx, strategy_id=best_sig.strategy_id, regime=assess.regime.value)
         if block.code:
             self.active_thought = f"{sym} {best_sig.strategy_id} {best_sig.side.value} filtered: {block.detail}"
             await self._log_decision(
@@ -669,7 +701,46 @@ class TradingOrchestrator:
                 )
             )
             return
-        if reviewed:
+        if reviewed and not per_trade_llm:
+            # Periodic / Hybrid fast path: instant (<0.1ms) evaluation against latest DeskBrief — ZERO price drift!
+            if self.supervisor.brief_is_due() and not self._brief_refreshing:
+                t = asyncio.create_task(self.refresh_supervisor_brief(force=False))
+                self._bg_tasks.add(t)
+                t.add_done_callback(self._bg_tasks.discard)
+            verdict = self.supervisor.evaluate_from_brief(sym, best_sig.side, best_sig.strategy_id)
+            if self.supervisor.last:
+                self.supervisor.last["symbol"] = sym
+            raw = self.paper_books["raw"].positions.get(sym)
+            if raw is not None and raw.veto == "PENDING":
+                raw.veto = verdict.decision if not verdict.error else "NONE"
+                await self._save_paper()
+            note = f" | AI Supervisor {verdict.decision} (brief, 0ms): {verdict.reason}"
+            if not verdict.allows_entry:
+                await self._log_decision(
+                    DecisionEvent(
+                        symbol=sym,
+                        category="BLOCK",
+                        tag="SUPERVISOR VETO" if not verdict.error else "SUPERVISOR DOWN",
+                        strategy_id=best_sig.strategy_id,
+                        side=best_sig.side.value,
+                        message=f"{best_sig.side.value} {risk_dec.volume} lot skipped{note}",
+                        latency_ms=lat_ms,
+                    )
+                )
+                self.active_thought = f"{sym} vetoed by AI Supervisor brief: {verdict.reason}"
+                return
+            if verdict.size_multiplier < 1.0:
+                new_vol = scale_volume(risk_dec.volume, verdict.size_multiplier, spec)
+                if new_vol <= 0:
+                    await self._log_decision(
+                        DecisionEvent(symbol=sym, category="BLOCK", tag="SUPERVISOR REDUCE", strategy_id=best_sig.strategy_id,
+                                      side=best_sig.side.value, message=f"Reduced size below broker minimum — skipped{note}")
+                    )
+                    return
+                risk_dec.volume = new_vol
+            await self._finalize_entry(sym, best_sig, risk_dec, assess, spec, ml_prob, dl_align, b_weight, spread_pts, lat_ms, note)
+            return
+        if per_trade_llm:
             if sym in self._supervising:
                 return
             self._supervising.add(sym)
@@ -1050,7 +1121,28 @@ class TradingOrchestrator:
 
     def _net_take(self, symbol: str) -> NetTake:
         h = self.config.paper.hit_run
-        return NetTake(min_net_profit=h.min_net_profit, commission_per_lot=self.paper_costs(symbol)["commission_per_lot"])
+        return NetTake(
+            min_net_profit=h.min_net_profit,
+            commission_per_lot=self.paper_costs(symbol)["commission_per_lot"],
+            min_cost_multiple=h.min_cost_multiple,
+        )
+
+    def _commission_price(
+        self,
+        symbol: str,
+        spec: SymbolSpec | None,
+        live_comm: float | None = None,
+        live_vol: float = 0.0,
+    ) -> float:
+        """Convert round-trip broker commission into exact price distance so Breakeven truly breaks even."""
+        if spec is None or spec.tick_size <= 0 or spec.tick_value <= 0:
+            return 0.0
+        money_per_px = spec.tick_value / spec.tick_size
+        if live_comm is not None and live_comm != 0 and live_vol > 0:
+            comm_per_lot = abs(live_comm) * 2.0 / live_vol
+        else:
+            comm_per_lot = self.paper_costs(symbol)["commission_per_lot"]
+        return max(0.0, comm_per_lot / money_per_px)
 
     def _exit_policy(self) -> ProfitLock:
         e = self.config.exits
@@ -1073,22 +1165,29 @@ class TradingOrchestrator:
             p.mfe_r = max(p.mfe_r, cur_r)
             spec = self.specs.get(p.symbol)
             spread_px = (tk.ask - tk.bid) if tk.ask > tk.bid else (tk.spread_points * (spec.point if spec else 0.0))
+            comm_px = self._commission_price(p.symbol, spec)
+            spread_money = (spread_px / spec.tick_size * spec.tick_value * p.volume) if (spec and spec.tick_size > 0) else 0.0
             close_reason = ""
             if name == "hitrun":
-                # Hit & Run: take any net profit. Valued at bid/ask, so spread is already paid.
-                take, net = net_take(self._net_take(p.symbol), gross_money=self._paper_money(p, self._paper_exit_px(p, px)), volume=p.volume)
+                # Hit & Run: take net profit above both min_net_profit and cost-multiple floor.
+                take, net = net_take(
+                    self._net_take(p.symbol),
+                    gross_money=self._paper_money(p, self._paper_exit_px(p, px)),
+                    volume=p.volume,
+                    spread_money=spread_money,
+                )
                 action, new_sl = ("CLOSE" if take else "HOLD"), p.sl
                 if not take and time_stop_due(p.open_time, now_sec, p.time_stop_bars, net):
                     action, close_reason = "CLOSE", "TIME_STOP"
             else:
                 action, new_sl = evaluate(
                     self._exit_policy(), side=p.side, entry=p.entry_price, risk=p.risk_dist,
-                    price=px, peak_r=p.mfe_r, sl=p.sl, spread_px=spread_px,
+                    price=px, peak_r=p.mfe_r, sl=p.sl, spread_px=spread_px, commission_px=comm_px,
                 )
             if name != "hitrun" and p.tp_stages:
                 peak_px = p.entry_price + p.mfe_r * p.risk_dist if p.side == Side.BUY else p.entry_price - p.mfe_r * p.risk_dist
                 staged = stage_stop(side=p.side, entry=p.entry_price, stages=p.tp_stages, peak_price=peak_px,
-                                    sl=new_sl if action == "MOVE_SL" else p.sl, cost_px=spread_px)
+                                    sl=new_sl if action == "MOVE_SL" else p.sl, cost_px=spread_px + comm_px)
                 if staged is not None and action != "CLOSE":
                     action, new_sl = "MOVE_SL", staged
             if action == "MOVE_SL":
@@ -1181,7 +1280,7 @@ class TradingOrchestrator:
         await self.db.set_kv("rl_exit_state", self.rl_exit.to_dict(), now_ms)
         await self.db.set_kv("veto_stats", self.veto_stats, now_ms)
 
-    def _entry_filter(self, ctx: dict[str, Any]):
+    def _entry_filter(self, ctx: dict[str, Any], *, strategy_id: str = "", regime: str = ""):
         f = self.config.filters
         self.filter_learner.min_samples = f.min_samples
         session_mode = "on" if self.config.shields.preferred_sessions_only and f.session_mode == "off" else f.session_mode
@@ -1189,7 +1288,145 @@ class TradingOrchestrator:
             self.filter_learner, htf_mode=f.htf_mode, htf_timeframe=f.htf_timeframe, session_mode=session_mode,
             blocked_sessions=f.blocked_sessions, m15=ctx["htf_m15"], h1=ctx["htf_h1"], session=ctx["session"],
             ichimoku_mode=f.ichimoku_mode, ichi=int(ctx.get("ichi_m15", 0)), ichi_threshold=f.ichimoku_threshold,
+            strategy_id=strategy_id, regime=regime,
+            trend_strategies_require_htf=f.trend_strategies_require_htf,
+            block_breakout_in_ranging=f.block_breakout_in_ranging,
         )
+
+    def _maybe_trigger_auto_warmup(self) -> None:
+        """Auto-run the first DL/ML training cycle once historical backfill settles or enough bars exist."""
+        if (
+            self._warmup_triggered
+            or self.evolution_running
+            or not self.config.evolution.auto_warmup_on_backfill
+            or (self.dl_net.trained and self.ml_labeler.trained)
+        ):
+            return
+        last_bf = getattr(self, "_last_backfill_ts", 0.0)
+        if last_bf > 0.0:
+            # Wait 2.5s after the last history_bars chunk so multi-symbol chunked backfill completes first.
+            if (time.monotonic() - last_bf) < 2.5:
+                return
+            min_req = max(120, self.config.evolution.min_bars_for_wfo)
+        else:
+            # Without explicit MT5 history backfill, require a deeper live bar cushion (600+ M1 bars).
+            min_req = max(600, self.config.evolution.min_bars_for_wfo)
+        ready = sum(1 for buf in self.bars.values() if len(buf) >= min_req)
+        if ready == 0:
+            return
+        self._warmup_triggered = True
+        try:
+            task = asyncio.create_task(self._run_auto_warmup())
+            self._bg_tasks.add(task)
+            task.add_done_callback(self._bg_tasks.discard)
+        except RuntimeError:
+            self._warmup_triggered = False
+
+    async def _run_auto_warmup(self) -> None:
+        try:
+            await self.run_evolution_cycle()
+        except Exception:
+            self._warmup_triggered = False
+
+    def build_desk_brief_digest(self) -> str:
+        """Build compact multi-symbol market digest for periodic AI Supervisor Desk Brief."""
+        import json
+
+        rows = []
+        for sym in self.config.instruments.symbols:
+            bars = list(self.bars.get(sym, ()))
+            tk = self.ticks.get(sym)
+            spec = self.specs.get(sym, DEFAULT_SPECS["XAUUSD"])
+            if len(bars) < 40:
+                continue
+            assess = classify_regime(bars[-SIGNAL_BARS:])
+            if assess is None:
+                continue
+            m15_b = htf_bias(bars, 15)
+            h1_b = htf_bias(bars, 60)
+            ichi_s = ichimoku.htf_score(bars, 15)
+            sp_pts = tk.spread_points if tk else bars[-1].spread_points
+            sp_atr = round((sp_pts * spec.point) / max(assess.indicators.atr14, 1e-9), 3)
+            rows.append({
+                "symbol": sym,
+                "regime": assess.regime.value,
+                "vol_ratio": assess.volatility_ratio,
+                "adx14": round(assess.indicators.adx14, 1),
+                "m15_bias": m15_b,
+                "h1_bias": h1_b,
+                "ichi_m15": ichi_s,
+                "spread_atr": sp_atr,
+                "shield": self.shield_status.get(sym, "CLEAR"),
+            })
+        payload = {
+            "utc_hour": int((utc_now_ms() // 1000 % 86400) // 3600),
+            "daily_dd_pct": round(self.account.daily_dd_pct, 2),
+            "daily_dd_limit_pct": self.config.risk.max_daily_drawdown_pct,
+            "consecutive_losses": self.risk.consecutive_losses,
+            "recent_trades_r": [round(t.pnl_r, 2) for t in list(self._recent_closed)[-8:]],
+            "symbols": rows,
+        }
+        return "Multi-symbol desk digest:\n" + json.dumps(payload, separators=(",", ":"))
+
+    async def refresh_supervisor_brief(self, force: bool = False) -> dict[str, Any]:
+        if not self.supervisor.active or self._brief_refreshing:
+            return self.supervisor.status()
+        if not force and not self.supervisor.brief_is_due():
+            return self.supervisor.status()
+        digest = self.build_desk_brief_digest()
+        if '"symbols":[]' in digest:
+            return self.supervisor.status()
+        self._brief_refreshing = True
+        try:
+            brief = await self.supervisor.refresh_brief(digest)
+            if brief:
+                summary = ", ".join(f"{k}:{v.bias}" for k, v in brief.items())
+                await self._log_decision(
+                    DecisionEvent(
+                        symbol="SUPERVISOR",
+                        category="AI",
+                        tag="DESK BRIEF",
+                        message=f"Updated {self.supervisor.brief_provider}: {summary} | {self.supervisor.brief_summary}",
+                    )
+                )
+        finally:
+            self._brief_refreshing = False
+        return self.supervisor.status()
+
+    async def reset_paper_books(self, reset_learners: bool = True) -> dict[str, Any]:
+        """Archive/wipe pre-fix virtual paper & shadow history for a clean forward test marathon."""
+        deleted = await self.db.clear_paper_trades()
+        start = self.config.paper.start_equity
+        self.paper_books = {k: PaperBook(equity=start) for k in PAPER_BOOKS}
+        self.shadow_positions.clear()
+        self.shadow_equity = start
+        self.veto_stats = {}
+        self.exit_selector = ExitStyleSelector(min_samples=self.config.exits.adaptive_min_samples)
+        self.hitrun_tuner = HitRunTuner(min_samples=self.config.paper.hit_run.adaptive_min_samples)
+        self.filter_learner = FilterLearner(min_samples=self.config.filters.min_samples)
+        now_ms = utc_now_ms()
+        if reset_learners:
+            self.bandit = ContextualBanditRL(forgetting_factor=self.config.ai.bandit_forgetting_factor)
+            self.rl_exit = RLExitAgent(
+                be_trigger_r=self.config.ai.rl_exit_be_trigger_r,
+                trail_trigger_r=self.config.ai.rl_exit_trail_trigger_r,
+            )
+            await self.db.set_kv("bandit_state", self.bandit.to_dict(), now_ms)
+            await self.db.set_kv("rl_exit_state", self.rl_exit.to_dict(), now_ms)
+        await self._save_paper()
+        await self._save_arena()
+        await self.db.set_kv("veto_stats", self.veto_stats, now_ms)
+        await self.db.set_kv("hitrun_tuner", self.hitrun_tuner.to_dict(), now_ms)
+        await self.db.set_kv("filter_stats", self.filter_learner.to_dict(), now_ms)
+        await self._log_decision(
+            DecisionEvent(
+                symbol="PAPER",
+                category="EVOLUTION",
+                tag="PAPER RESET",
+                message=f"Cleared {deleted} old paper/shadow trades and reset paper books to ${start:,.0f} (learners reset={reset_learners})",
+            )
+        )
+        return {"cleared_trades": deleted, "start_equity": start, "reset_learners": reset_learners}
 
     def filters_view(self) -> dict[str, Any]:
         f = self.config.filters
@@ -1264,6 +1501,8 @@ class TradingOrchestrator:
             # agent, which only moved to BE at +0.8R and let +0.5R trades fall back to a full loss.
             tk = self.ticks.get(pos.symbol)
             spread_px = (tk.ask - tk.bid) if tk and tk.ask > tk.bid else 0.0
+            comm_px = self._commission_price(pos.symbol, spec, live_comm=meta.commission, live_vol=pos.volume)
+            spread_money = (spread_px / spec.tick_size * spec.tick_value * pos.volume) if spec.tick_size > 0 else 0.0
             style = meta.exit_style or self._mt5_exit_style(pos.symbol, meta.regime)
             close_tag = "HIT & RUN TAKE"
             if style == "hitrun":
@@ -1271,7 +1510,8 @@ class TradingOrchestrator:
                 # round-trip commission (MT5 reports the entry side, the exit side costs the same).
                 comm = abs(meta.commission) * 2 if meta.commission else None
                 take, net = net_take(
-                    self._net_take(pos.symbol), gross_money=pos.profit, volume=pos.volume, swap=pos.swap, commission=comm
+                    self._net_take(pos.symbol), gross_money=pos.profit, volume=pos.volume,
+                    swap=pos.swap, commission=comm, spread_money=spread_money,
                 )
                 lock_action, lock_sl = ("CLOSE" if take else "HOLD"), pos.sl
                 if not take and meta.time_stop_bars and meta.bars_held >= meta.time_stop_bars and net <= 0:
@@ -1279,13 +1519,13 @@ class TradingOrchestrator:
             else:
                 lock_action, lock_sl = evaluate(
                     self._exit_policy(), side=meta.side, entry=meta.entry_price, risk=meta.initial_risk_price,
-                    price=pos.current_price, peak_r=meta.mfe_r, sl=pos.sl, spread_px=spread_px,
+                    price=pos.current_price, peak_r=meta.mfe_r, sl=pos.sl, spread_px=spread_px, commission_px=comm_px,
                 )
                 if meta.tp_stages:
                     risk = meta.initial_risk_price
                     peak_px = meta.entry_price + meta.mfe_r * risk if meta.side == Side.BUY else meta.entry_price - meta.mfe_r * risk
                     staged = stage_stop(side=meta.side, entry=meta.entry_price, stages=meta.tp_stages, peak_price=peak_px,
-                                        sl=lock_sl if lock_action == "MOVE_SL" else pos.sl, cost_px=spread_px)
+                                        sl=lock_sl if lock_action == "MOVE_SL" else pos.sl, cost_px=spread_px + comm_px)
                     if staged is not None:
                         lock_action, lock_sl = "MOVE_SL", staged
             if lock_action == "CLOSE":
@@ -1361,10 +1601,11 @@ class TradingOrchestrator:
             pos.rl_exit_action = action
 
             if action == RLExitAction.MOVE_BE and not meta.already_at_be:
+                be_buf = 0.06 * meta.initial_risk_price + spread_px + comm_px
                 be_sl = (
-                    round(meta.entry_price + 0.06 * meta.initial_risk_price, spec.digits)
+                    round(meta.entry_price + be_buf, spec.digits)
                     if meta.side == Side.BUY
-                    else round(meta.entry_price - 0.06 * meta.initial_risk_price, spec.digits)
+                    else round(meta.entry_price - be_buf, spec.digits)
                 )
                 meta.already_at_be = True
                 meta.rl_trace.append("MOVE_BE")

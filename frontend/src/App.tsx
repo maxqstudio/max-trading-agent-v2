@@ -265,7 +265,7 @@ export default function App() {
               <div className="flex justify-between"><span className="text-[#8A9BB5]">AI Scans</span><span className="mono font-bold">{state?.scans_count ?? 0}</span></div>
               <div className="flex justify-between"><span className="text-[#8A9BB5]">Paper Normal</span><span className="mono font-bold text-[#F59E0B]">${(state?.paper?.books?.normal?.equity ?? state?.paper?.equity ?? 10000).toFixed(0)}</span></div>
               <div className="flex justify-between"><span className="text-[#8A9BB5]">Paper Hit &amp; Run</span><span className="mono font-bold text-[#EC4899]">${(state?.paper?.books?.hitrun?.equity ?? 10000).toFixed(0)}</span></div>
-              <div className="flex justify-between" title="Every setup that passed risk, including the ones Claude rejected"><span className="text-[#8A9BB5]">Paper No Veto</span><span className="mono font-bold text-[#14B8A6]">${(state?.paper?.books?.raw?.equity ?? 10000).toFixed(0)}</span></div>
+              <div className="flex justify-between" title="Every setup that passed risk, including the ones AI Supervisor rejected"><span className="text-[#8A9BB5]">Paper No Veto</span><span className="mono font-bold text-[#14B8A6]">${(state?.paper?.books?.raw?.equity ?? 10000).toFixed(0)}</span></div>
               <div className="flex justify-between" title="Evolved strategy version being tested alongside (challenger)"><span className="text-[#8A9BB5]">Challenger (evolution)</span><span className="mono font-bold text-[#8B5CF6]">${(state?.shadow_equity ?? 10000).toFixed(0)}</span></div>
             </div>
           </div>

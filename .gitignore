@@ -1,5 +1,7 @@
 # Secrets & local env
 config/local.yaml
+*.local.yaml
+*.local.json
 .env
 .env.*
 !.env.example
@@ -43,6 +45,7 @@ logs/
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
+*.tsbuildinfo
 
 # IDE & OS
 .vscode/

@@ -55,7 +55,7 @@ def build_runtime(sim_mode: bool = False, config_path: str = "config/default.yam
 
             bg_tasks.append(asyncio.create_task(_sim_loop()))
 
-        # Scheduled self-improvement loop
+        # Scheduled self-improvement loop + periodic AI Supervisor Desk Brief
         async def _evolution_scheduler() -> None:
             interval_sec = max(300, config.evolution.schedule_interval_minutes * 60)
             while True:
@@ -63,7 +63,14 @@ def build_runtime(sim_mode: bool = False, config_path: str = "config/default.yam
                 with contextlib.suppress(Exception):
                     await orchestrator.run_evolution_cycle()
 
+        async def _supervisor_brief_scheduler() -> None:
+            while True:
+                await asyncio.sleep(30)
+                with contextlib.suppress(Exception):
+                    await orchestrator.refresh_supervisor_brief(force=False)
+
         bg_tasks.append(asyncio.create_task(_evolution_scheduler()))
+        bg_tasks.append(asyncio.create_task(_supervisor_brief_scheduler()))
 
         try:
             yield
