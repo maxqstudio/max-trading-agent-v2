@@ -276,6 +276,14 @@ class SequenceConvNet:
             "val_acc": round(self.last_val_accuracy, 4),
         }
 
+    def evaluate(self, x: np.ndarray, y_dir: np.ndarray, y_vol: np.ndarray) -> dict[str, float] | None:
+        """Loss and direction accuracy on data the net has not trained on (None if untrained or too little data)."""
+        if not self.trained or len(x) < 5:
+            return None
+        loss, _ = self._compute_loss_and_grads(x, y_dir, y_vol)
+        dir_p, _, _ = self._forward(x)
+        return {"loss": round(float(loss), 5), "acc": round(float(np.mean(np.argmax(dir_p, axis=1) == y_dir)), 4), "n": float(len(x))}
+
     def predict(self, seq: np.ndarray | None) -> DLPrediction:
         if seq is None:
             return DLPrediction(trained=self.trained)

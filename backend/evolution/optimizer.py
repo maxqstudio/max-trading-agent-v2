@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import copy
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -39,6 +40,9 @@ class WFOResult:
     ml_train_summary: dict[str, float]
     trained_dl: SequenceConvNet
     trained_ml: CalibratedMetaLabeler
+    # What happened to each model this cycle: kept the champion or adopted the new one, and why.
+    dl_decision: dict = field(default_factory=dict)
+    ml_decision: dict = field(default_factory=dict)
 
 
 class PurgedWalkForwardOptimizer:
@@ -72,51 +76,55 @@ class PurgedWalkForwardOptimizer:
         champion_config: TradingConfig,
         extra_patches: list[ParameterPatch] | None = None,
         specs: dict[str, SymbolSpec] | None = None,
+        champion_dl: SequenceConvNet | None = None,
+        champion_ml: CalibratedMetaLabeler | None = None,
+        param_window_bars: int | None = None,
     ) -> WFOResult:
         sym_specs = specs or DEFAULT_SPECS
         train_bars, oos_bars = self._split_bars_purged(bars_by_symbol)
 
-        # 1. Retrain Lightweight DL 1D-CNN strictly on Train split
-        dl_net = SequenceConvNet(seed=int(self.rng.integers(1, 10000)))
-        all_x, all_yd, all_yv = [], [], []
-        for sym, b_list in train_bars.items():
-            spec = sym_specs.get(sym, DEFAULT_SPECS["XAUUSD"])
-            xs, yds, yvs = build_dl_training_dataset(
-                b_list,
-                seq_len=champion_config.ai.dl_seq_len,
-                horizon=8,
-                point=spec.point,
-            )
-            if len(xs) > 0:
-                all_x.append(xs)
-                all_yd.append(yds)
-                all_yv.append(yvs)
-
-        dl_summary = {"train_loss": 0.0, "val_loss": 0.0, "val_acc": 0.0}
-        if all_x:
-            x_cat = np.concatenate(all_x, axis=0)
-            yd_cat = np.concatenate(all_yd, axis=0)
-            yv_cat = np.concatenate(all_yv, axis=0)
-            if len(x_cat) >= 40:
-                dl_summary = dl_net.fit(
-                    x_cat,
-                    yd_cat,
-                    yv_cat,
-                    epochs=champion_config.ai.dl_epochs,
-                    lr=champion_config.ai.dl_lr,
+        # 1. DL 1D-CNN: continue from the champion's weights (warm start) on the Train split,
+        #    then keep whichever of champion / new has the lower loss on the unseen OOS split.
+        def dl_dataset(bmap: dict[str, list[Bar]]) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+            xs_all, yd_all, yv_all = [], [], []
+            for sym, b_list in bmap.items():
+                spec = sym_specs.get(sym, DEFAULT_SPECS["XAUUSD"])
+                xs, yds, yvs = build_dl_training_dataset(
+                    b_list, seq_len=champion_config.ai.dl_seq_len, horizon=8, point=spec.point
                 )
+                if len(xs) > 0:
+                    xs_all.append(xs)
+                    yd_all.append(yds)
+                    yv_all.append(yvs)
+            if not xs_all:
+                return None
+            return np.concatenate(xs_all, axis=0), np.concatenate(yd_all, axis=0), np.concatenate(yv_all, axis=0)
 
-        # 2. Collect strictly in-sample meta-labeling features & retrain Calibrated ML Meta-Labeler
-        ml_labeler = CalibratedMetaLabeler()
+        warm = champion_dl is not None and champion_dl.trained
+        dl_net = copy.deepcopy(champion_dl) if warm else SequenceConvNet(seed=int(self.rng.integers(1, 10000)))
+        dl_summary = {"train_loss": 0.0, "val_loss": 0.0, "val_acc": 0.0}
+        tr_ds, oos_ds = dl_dataset(train_bars), dl_dataset(oos_bars)
+        if tr_ds is not None and len(tr_ds[0]) >= 40:
+            lr = champion_config.ai.dl_lr * (champion_config.evolution.dl_finetune_lr_mult if warm else 1.0)
+            dl_summary = dl_net.fit(*tr_ds, epochs=champion_config.ai.dl_epochs, lr=lr)
+        dl_net, dl_decision = _pick_dl(champion_dl, dl_net, oos_ds, warm)
+
+        # 2. ML Meta-Labeler: trained on in-sample setups, kept only if its Brier score on
+        #    out-of-sample setups beats the champion's.
         _, _, (mx, my) = self.backtester.run(
-            train_bars,
-            champion_config,
-            specs=sym_specs,
-            dl_net=dl_net,
-            ml_labeler=None,
-            collect_meta_samples=True,
+            train_bars, champion_config, specs=sym_specs, dl_net=dl_net, ml_labeler=None, collect_meta_samples=True
         )
-        ml_summary = ml_labeler.fit_purged_walk_forward(mx, my)
+        new_ml = CalibratedMetaLabeler()
+        ml_summary = new_ml.fit_purged_walk_forward(mx, my)
+        _, _, (ox, oy) = self.backtester.run(
+            oos_bars, champion_config, specs=sym_specs, dl_net=dl_net, ml_labeler=None, collect_meta_samples=True
+        )
+        ml_labeler, ml_decision = _pick_ml(champion_ml, new_ml, ox, oy)
+
+        # Strategy parameters are searched on the most recent part of the window only (much cheaper).
+        if param_window_bars:
+            pw = max(param_window_bars, 200)
+            train_bars, oos_bars = self._split_bars_purged({k: v[-pw:] for k, v in bars_by_symbol.items()})
 
         # 3. Evaluate Champion baseline on Out-of-Sample split + Monte Carlo
         champ_oos, champ_trades, _ = self.backtester.run(
@@ -216,4 +224,57 @@ class PurgedWalkForwardOptimizer:
             ml_train_summary=ml_summary,
             trained_dl=dl_net,
             trained_ml=ml_labeler,
+            dl_decision=dl_decision,
+            ml_decision=ml_decision,
         )
+
+
+def _pick_dl(
+    champion: SequenceConvNet | None,
+    new: SequenceConvNet,
+    oos: tuple[np.ndarray, np.ndarray, np.ndarray] | None,
+    warm: bool,
+) -> tuple[SequenceConvNet, dict]:
+    has_champ = champion is not None and champion.trained
+    if not new.trained:
+        return (champion if has_champ else new), {"adopted": False, "reason": "training skipped (too little data)", "warm_start": warm}
+    if not has_champ:
+        return new, {"adopted": True, "reason": "first model", "warm_start": False}
+    c = champion.evaluate(*oos) if oos is not None else None
+    n = new.evaluate(*oos) if oos is not None else None
+    if c is None or n is None:
+        return champion, {"adopted": False, "reason": "no out-of-sample data to compare", "warm_start": warm}
+    better = n["loss"] < c["loss"]
+    return (new if better else champion), {
+        "adopted": better,
+        "reason": f"OOS loss {n['loss']:.4f} vs champion {c['loss']:.4f}",
+        "warm_start": warm,
+        "new": n,
+        "champion": c,
+    }
+
+
+def _pick_ml(
+    champion: CalibratedMetaLabeler | None, new: CalibratedMetaLabeler, ox: np.ndarray, oy: np.ndarray
+) -> tuple[CalibratedMetaLabeler, dict]:
+    has_champ = champion is not None and champion.trained
+    if not new.trained:
+        return (champion if has_champ else new), {"adopted": False, "reason": "training skipped (too few setups)"}
+    if not has_champ:
+        return new, {"adopted": True, "reason": "first model"}
+    c, n = champion.score(ox, oy), new.score(ox, oy)
+    if c is None or n is None:
+        # Too few unseen setups to compare. Prefer the model that learned from more setups.
+        more = new.n_samples >= champion.n_samples
+        return (new if more else champion), {
+            "adopted": more,
+            "reason": f"only {len(oy)} out-of-sample setups; trained on {new.n_samples} vs champion {champion.n_samples} setups",
+        }
+    better = n < c
+    return (new if better else champion), {
+        "adopted": better,
+        "reason": f"OOS Brier {n:.4f} vs champion {c:.4f} (lower is better)",
+        "new_brier": n,
+        "champion_brier": c,
+        "oos_setups": int(len(oy)),
+    }

@@ -69,6 +69,7 @@ class ExitSetupRequest(BaseModel):
     hit_trail_dist_r: float | None = Field(default=None, ge=0.0, le=2.0)
     hit_min_spread_mult: float | None = Field(default=None, ge=0.0, le=10.0)
     adaptive: bool | None = None
+    hit_adaptive: bool | None = None
 
 
 def _mask(key: str) -> str:
@@ -226,7 +227,7 @@ def register_setup_routes(api: APIRouter, orch: TradingOrchestrator, env_path: s
             if v is not None
         })
         hr = orch.config.paper.hit_run.model_copy(update={
-            k: v for k, v in {"take_r": req.hit_take_r, "trail_dist_r": req.hit_trail_dist_r, "min_spread_mult": req.hit_min_spread_mult}.items()
+            k: v for k, v in {"take_r": req.hit_take_r, "trail_dist_r": req.hit_trail_dist_r, "min_spread_mult": req.hit_min_spread_mult, "adaptive": req.hit_adaptive}.items()
             if v is not None
         })
         orch.config.exits = ex
