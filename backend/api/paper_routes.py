@@ -69,8 +69,28 @@ def register_paper_routes(api: APIRouter, orch: TradingOrchestrator) -> None:
             "open_positions": len(orch.open_positions),
             **summarize(mt5, orch.account.balance or start),
         })
+        all_shadow = await orch.db.list_trades(limit=5000, is_shadow=True)
+        shadow_veto = [t for t in all_shadow if not t.version_id.endswith("-raw")]
+        shadow_raw = [t for t in all_shadow if t.version_id.endswith("-raw")]
+        challengers = [
+            {
+                "book": "shadow",
+                "label": "Challenger (AI Veto)",
+                "equity": orch.shadow_equity,
+                "open_positions": len(orch.shadow_positions),
+                **summarize(shadow_veto, start),
+            },
+            {
+                "book": "shadow_raw",
+                "label": "Challenger (Raw)",
+                "equity": orch.shadow_raw_equity,
+                "open_positions": len(orch.shadow_raw_positions),
+                **summarize(shadow_raw, start),
+            },
+        ]
         return {
             "rows": rows,
+            "challengers": challengers,
             "ai_cost_today_usd": ai_cost,
             "note": "Full 2x2 matrix: Normal & Hit & Run trade only setups approved by filters + AI Supervisor; No Veto (Normal) & No Veto (Hit & Run) open every risk-approved setup.",
             "learning": {

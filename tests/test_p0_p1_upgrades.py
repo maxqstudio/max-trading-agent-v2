@@ -576,26 +576,34 @@ async def test_shadow_challenger_respects_ai_supervisor_brief_and_p0_filters(tmp
         orch.shadow_suite.scan_all = lambda *a, **kw: [sig_buy]
         dl = DLPrediction(prob_up=0.70, prob_down=0.15, prob_flat=0.15, vol_expansion=0.5, trained=True)
 
-        # 1. AI Supervisor brief says SHORT_ONLY -> Challenger BUY must be rejected, and Champion stats stay 0!
+        # 1. AI Supervisor brief says SHORT_ONLY -> Challenger (AI Veto) BUY is rejected,
+        #    while pure Challenger (Raw) still opens! Champion stats stay 0.
         orch.supervisor.brief["XAUUSD"] = SymbolBrief(symbol="XAUUSD", bias="SHORT_ONLY", risk_multiplier=1.0, avoid_strategies=[], reason="Bearish")
         orch.supervisor.brief_updated_ts = time.time()
         await orch._scan_shadow_challenger("XAUUSD", bars, snap, MarketRegime.RANGING, dl, 10.0, spec, now_s, htf=(1, 1))
         assert "XAUUSD" not in orch.shadow_positions
+        assert "XAUUSD" in orch.shadow_raw_positions
+        assert orch.shadow_raw_positions["XAUUSD"].version_id.endswith("-raw")
         assert orch.supervisor.stats["reject"] == 0
 
-        # 2. Micro Breakout in RANGING -> Challenger must block via P0 Ranging Breakout guard even when brief allows BOTH!
+        # 2. Micro Breakout in RANGING -> Challenger (AI Veto) blocks via P0 guard even when brief allows BOTH!
         orch.supervisor.brief["XAUUSD"] = SymbolBrief(symbol="XAUUSD", bias="BOTH", risk_multiplier=1.0, avoid_strategies=[], reason="Two-way")
         bo_sig = sig_buy.model_copy(update={"strategy_id": "micro_breakout"})
         orch.shadow_suite.scan_all = lambda *a, **kw: [bo_sig]
         await orch._scan_shadow_challenger("XAUUSD", bars, snap, MarketRegime.RANGING, dl, 10.0, spec, now_s, htf=(1, 1))
         assert "XAUUSD" not in orch.shadow_positions
 
-        # 3. Liquidity sweep when brief allows LONG_ONLY with risk_multiplier=0.5 -> Challenger opens at 0.5x risk!
+        # 3. Liquidity sweep when brief allows LONG_ONLY with risk_multiplier=0.5 -> Challenger (AI Veto) opens at 0.5x!
         orch.supervisor.brief["XAUUSD"] = SymbolBrief(symbol="XAUUSD", bias="LONG_ONLY", risk_multiplier=0.5, avoid_strategies=[], reason="Half size")
         orch.shadow_suite.scan_all = lambda *a, **kw: [sig_buy]
         await orch._scan_shadow_challenger("XAUUSD", bars, snap, MarketRegime.RANGING, dl, 10.0, spec, now_s, htf=(1, 1))
         assert "XAUUSD" in orch.shadow_positions
         assert orch.shadow_positions["XAUUSD"].volume == 0.5
         assert orch.supervisor.stats["reduce"] == 0  # Champion stats untouched
+
+        # 4. Reset clears both Challenger books cleanly to $10,000
+        await orch.reset_paper_books(reset_learners=True)
+        assert orch.shadow_positions == {} and orch.shadow_raw_positions == {}
+        assert orch.shadow_equity == cfg.paper.start_equity and orch.shadow_raw_equity == cfg.paper.start_equity
     finally:
         await db.close()
