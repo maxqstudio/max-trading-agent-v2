@@ -18,6 +18,8 @@ export interface FiltersView {
   settings: {
     htf_mode: Mode;
     htf_timeframe: 'M15' | 'H1' | 'BOTH';
+    trend_strategies_require_htf?: boolean;
+    block_breakout_in_ranging?: boolean;
     session_mode: Mode;
     blocked_sessions: string[];
     ichimoku_mode: Mode;
@@ -155,6 +157,24 @@ export const FiltersCard: React.FC<{ view: FiltersView; onSaved: (v: FiltersView
               <option value="M15">M15</option>
               <option value="BOTH">M15 and H1 (against either one)</option>
             </select>
+          </label>
+        </div>
+        <div className="flex flex-wrap gap-x-4 gap-y-1.5 pt-1">
+          <label className="flex items-center gap-1.5 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={s.trend_strategies_require_htf ?? true}
+              onChange={(e) => setS({ ...s, trend_strategies_require_htf: e.target.checked })}
+            />
+            <span>Trend strategies require HTF direction</span>
+          </label>
+          <label className="flex items-center gap-1.5 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={s.block_breakout_in_ranging ?? true}
+              onChange={(e) => setS({ ...s, block_breakout_in_ranging: e.target.checked })}
+            />
+            <span>Block Micro Breakout in Ranging regime</span>
           </label>
         </div>
         <StatsTable rows={view.htf[s.htf_timeframe] ?? []} label={(b) => BUCKET_LABEL[b] ?? b} minSamples={s.min_samples} />

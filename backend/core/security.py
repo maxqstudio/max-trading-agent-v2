@@ -16,6 +16,7 @@ HARD_SAFETY_BOUNDS: dict[str, tuple[float, float]] = {
     "risk.max_concurrent_positions": (1.0, 5.0),
     "risk.max_usd_correlated_positions": (1.0, 3.0),
     "risk.max_spread_atr_ratio": (0.12, 0.45),
+    "risk.max_cost_to_risk_ratio": (0.05, 0.35),
     "risk.consecutive_loss_limit": (2.0, 6.0),
     "risk.consecutive_loss_cooldown_min": (5.0, 120.0),
     "risk.min_rr_ratio": (1.05, 3.50),

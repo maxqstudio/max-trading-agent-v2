@@ -43,6 +43,7 @@ class RiskConfig(BaseModel):
     max_concurrent_positions: int = 3
     max_usd_correlated_positions: int = 2
     max_spread_atr_ratio: float = 0.30
+    max_cost_to_risk_ratio: float = 0.18  # block trade if (spread + commission) > 18% of SL risk
     consecutive_loss_limit: int = 3
     consecutive_loss_cooldown_min: int = 15
     min_rr_ratio: float = 1.25
@@ -95,12 +96,15 @@ class EvolutionConfig(BaseModel):
     param_window_bars: int = 600
     # The CNN continues from the champion's weights at this fraction of the normal learning rate.
     dl_finetune_lr_mult: float = 0.5
+    auto_warmup_on_backfill: bool = True
 
 
 class SupervisorConfig(BaseModel):
-    """LLM (Claude first) veto layer between the risk manager and MT5. See backend/engine/supervisor.py."""
+    """AI Supervisor layer between the risk manager and MT5. See backend/engine/supervisor.py."""
 
     enabled: bool = True
+    mode: Literal["periodic", "hybrid", "per_trade"] = "periodic"
+    brief_interval_min: int = 15
     timeout_s: float = 6.0
     use_fast_model: bool = True
     effort: str = "low"
@@ -114,10 +118,10 @@ class SupervisorConfig(BaseModel):
 class ExitConfig(BaseModel):
     """Profit protection for the existing system (MT5 positions + 'existing' paper book)."""
 
-    be_at_r: float = 0.5  # move SL to breakeven once the trade has been +0.5R
-    be_offset_r: float = 0.05
-    trail_start_r: float = 1.0
-    trail_dist_r: float = 0.5
+    be_at_r: float = 0.85  # move SL to breakeven (+ spread + commission) once trade reaches +0.85R
+    be_offset_r: float = 0.08
+    trail_start_r: float = 1.25
+    trail_dist_r: float = 0.55
     # Learn per symbol+regime from the two paper books whether Hit & Run beats Normal,
     # and use the winner for real MT5 positions once there is enough evidence.
     adaptive: bool = True
@@ -130,6 +134,7 @@ class HitRunConfig(BaseModel):
     # Close as soon as the net profit (after spread, commission, swap) is at least this much
     # money per trade. $1 also leaves room for slippage on the close.
     min_net_profit: float = 1.0
+    min_cost_multiple: float = 2.0  # floor: net profit must also be >= 2.0x (commission + spread)
     # Its own stop loss, tighter than Normal's (see backend/engine/hitrun_stop.py).
     own_stop: bool = True
     max_loss_mult: float = 4.0  # max loss per trade = this x min_net_profit, commission included
@@ -161,7 +166,9 @@ class FiltersConfig(BaseModel):
     shows those setups do clearly worse than the rest."""
 
     htf_mode: Literal["off", "on", "auto"] = "auto"
-    htf_timeframe: Literal["M15", "H1", "BOTH"] = "H1"
+    htf_timeframe: Literal["M15", "H1", "BOTH"] = "BOTH"
+    trend_strategies_require_htf: bool = True
+    block_breakout_in_ranging: bool = True
     session_mode: Literal["off", "on", "auto"] = "auto"
     blocked_sessions: list[str] = Field(default_factory=lambda: ["asia", "late"])  # used by "on"
     # M15 Ichimoku checklist (price vs cloud, Tenkan vs Kijun, Chikou, price vs Kijun, future cloud):

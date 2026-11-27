@@ -209,9 +209,21 @@ export interface SupervisorLast {
   symbol?: string;
 }
 
+export interface SymbolBrief {
+  bias: 'LONG_ONLY' | 'SHORT_ONLY' | 'BOTH' | 'FLAT';
+  risk_multiplier: number;
+  avoid_strategies: string[];
+  note: string;
+}
+
 export interface SupervisorStatus {
   active: boolean;
   enabled: boolean;
+  mode?: 'periodic' | 'hybrid' | 'per_trade';
+  brief_interval_min?: number;
+  brief_updated_ts?: number;
+  brief_summary?: string;
+  brief?: Record<string, SymbolBrief>;
   timeout_s: number;
   daily_budget_usd: number;
   spent_today_usd: number;

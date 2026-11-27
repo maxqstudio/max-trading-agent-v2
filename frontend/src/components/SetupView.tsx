@@ -8,7 +8,7 @@ import { human } from '../labels';
 import { LOGO_FULL_URL } from './BullishLogo';
 
 // Setup page: AI providers (order, key, model from the provider's list, fallback models),
-// Claude supervisor settings, MT5 and safety info. Keys are written to the local .env only
+// AI Supervisor settings, MT5 and safety info. Keys are written to the local .env only
 // and come back masked. Live trading can't be unlocked here.
 
 type Provider = {
@@ -154,6 +154,8 @@ export const SetupView: React.FC<{ onToast: (msg: string) => void }> = ({ onToas
     try {
       const r = await api.saveSupervisorSetup({
         enabled: sup.enabled,
+        mode: sup.mode || 'periodic',
+        brief_interval_min: Number(sup.brief_interval_min || 15),
         timeout_s: Number(sup.timeout_s),
         use_fast_model: sup.use_fast_model,
         effort: sup.effort,
@@ -164,9 +166,22 @@ export const SetupView: React.FC<{ onToast: (msg: string) => void }> = ({ onToas
         review_in_shadow: sup.review_in_shadow,
       });
       setSup(r.supervisor);
-      onToast('Supervisor settings saved');
+      onToast('AI Supervisor settings saved');
     } catch (e) {
       onToast(`Could not save supervisor: ${(e as Error).message}`);
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const refreshBrief = async () => {
+    setBusy('brief');
+    try {
+      const r = await api.refreshSupervisorBrief();
+      setSup(r.supervisor);
+      onToast('Desk Brief refreshed');
+    } catch (e) {
+      onToast(`Could not refresh Desk Brief: ${(e as Error).message}`);
     } finally {
       setBusy('');
     }
@@ -343,20 +358,46 @@ export const SetupView: React.FC<{ onToast: (msg: string) => void }> = ({ onToas
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-3">
         {/* SUPERVISOR */}
         <div className="xl:col-span-7 cockpit-card rounded-lg p-3.5 space-y-3 text-xs">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between flex-wrap gap-2">
             <div>
-              <h3 className="font-bold uppercase tracking-wider">Supervisor Claude (veto)</h3>
+              <h3 className="font-bold uppercase tracking-wider">AI Supervisor</h3>
               <p className="text-[#8A9BB5] mt-0.5">Can only approve, reduce or reject a trade. Never raises risk.</p>
             </div>
-            <button onClick={saveSup} disabled={busy === 'sup'} className={`${btnCls} bg-[#3B82F6] text-white border-[#3B82F6]`}>
-              <Check className="w-3.5 h-3.5" /> Save
-            </button>
+            <div className="flex items-center gap-1.5">
+              {sup?.mode !== 'per_trade' && (
+                <button
+                  onClick={refreshBrief}
+                  disabled={busy === 'brief' || !sup?.enabled}
+                  className={`${btnCls} border-[#06B6D4]/50 text-[#06B6D4]`}
+                  title="Force an immediate multi-symbol Desk Brief update from the active AI provider"
+                >
+                  {busy === 'brief' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />} Refresh Brief
+                </button>
+              )}
+              <button onClick={saveSup} disabled={busy === 'sup'} className={`${btnCls} bg-[#3B82F6] text-white border-[#3B82F6]`}>
+                <Check className="w-3.5 h-3.5" /> Save
+              </button>
+            </div>
           </div>
           {sup && (
             <div className="grid grid-cols-2 md:grid-cols-3 gap-2.5">
               <Toggle label="On" value={sup.enabled} onChange={(v) => setSup({ ...sup, enabled: v })} />
               <Toggle label="Use the fast model" value={sup.use_fast_model} onChange={(v) => setSup({ ...sup, use_fast_model: v })} />
               <Toggle label="Also review in paper mode" value={sup.review_in_shadow} onChange={(v) => setSup({ ...sup, review_in_shadow: v })} />
+              <label className="space-y-1 md:col-span-2">
+                <span className="text-[#8A9BB5]">Supervision mode</span>
+                <select value={sup.mode || 'periodic'} onChange={(e) => setSup({ ...sup, mode: e.target.value })} className={inputCls}>
+                  <option value="periodic">Periodic desk brief (0ms per trade, zero M1 drift)</option>
+                  <option value="hybrid">Hybrid (brief for M1 scalps, per-trade veto for slow setups)</option>
+                  <option value="per_trade">Per-trade veto (live LLM call on every signal)</option>
+                </select>
+              </label>
+              <Num
+                label="Brief interval (min)"
+                value={sup.brief_interval_min ?? 15}
+                step={5}
+                onChange={(v) => setSup({ ...sup, brief_interval_min: Math.max(1, Math.round(v)) })}
+              />
               <Num label="Timeout (seconds)" value={sup.timeout_s} step={0.5} onChange={(v) => setSup({ ...sup, timeout_s: v })} />
               <Num label="Daily budget ($)" value={sup.daily_budget_usd} step={0.5} onChange={(v) => setSup({ ...sup, daily_budget_usd: v })} />
               <Num label="Max calls / hour" value={sup.max_calls_per_hour} step={10} onChange={(v) => setSup({ ...sup, max_calls_per_hour: v })} />
@@ -379,8 +420,36 @@ export const SetupView: React.FC<{ onToast: (msg: string) => void }> = ({ onToas
             </div>
           )}
           {sup?.status && (
-            <div className="mono text-[#8A9BB5]">
-              Today: {sup.status.calls} calls · ✓{sup.status.approve} ↓{sup.status.reduce} ✗{sup.status.reject} · ${sup.status.spent_today_usd?.toFixed(3)}
+            <div className="space-y-2">
+              <div className="mono text-[#8A9BB5]">
+                Mode: <b className="text-[#E6EDF7] uppercase">{sup.status.mode || 'periodic'}</b> · Today: {sup.status.calls} calls · ✓{sup.status.approve} ↓{sup.status.reduce} ✗{sup.status.reject} · ${sup.status.spent_today_usd?.toFixed(3)}
+              </div>
+              {sup.status.brief && Object.keys(sup.status.brief).length > 0 && (
+                <div className="cockpit-sub rounded-md p-2.5 space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-bold text-[#06B6D4]">Active Desk Brief</span>
+                    {sup.status.brief_summary && <span className="text-[#8A9BB5] truncate">{sup.status.brief_summary}</span>}
+                  </div>
+                  <div className="flex flex-wrap gap-1.5 mono">
+                    {Object.entries(sup.status.brief).map(([sym, b]: [string, any]) => {
+                      const tone =
+                        b.bias === 'LONG_ONLY'
+                          ? 'border-[#10B981]/40 text-[#10B981] bg-[#10B981]/10'
+                          : b.bias === 'SHORT_ONLY'
+                            ? 'border-[#EF4444]/40 text-[#EF4444] bg-[#EF4444]/10'
+                            : b.bias === 'FLAT'
+                              ? 'border-[#F59E0B]/40 text-[#F59E0B] bg-[#F59E0B]/10'
+                              : 'border-[#06B6D4]/40 text-[#06B6D4] bg-[#06B6D4]/10';
+                      return (
+                        <span key={sym} title={b.note || ''} className={`px-2 py-0.5 rounded border text-[11px] font-bold ${tone}`}>
+                          {sym}: {b.bias}
+                          {b.risk_multiplier < 0.99 ? ` ×${b.risk_multiplier.toFixed(1)}` : ''}
+                        </span>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>

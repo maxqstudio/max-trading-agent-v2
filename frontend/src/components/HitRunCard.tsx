@@ -6,6 +6,7 @@ import { api } from '../api/client';
 
 export interface HitRunSettings {
   min_net_profit: number;
+  min_cost_multiple?: number;
   own_stop: boolean;
   max_loss_mult: number;
   sl_atr_mult: number;
@@ -49,6 +50,7 @@ export const HitRunCard: React.FC<{ settings: HitRunSettings; onSaved: (s: HitRu
     try {
       const r = await api.saveExits({
         hit_min_net_profit: s.min_net_profit,
+        hit_min_cost_multiple: s.min_cost_multiple ?? 2.0,
         hit_own_stop: s.own_stop,
         hit_max_loss_mult: s.max_loss_mult,
         hit_sl_atr_mult: s.sl_atr_mult,
@@ -87,6 +89,14 @@ export const HitRunCard: React.FC<{ settings: HitRunSettings; onSaved: (s: HitRu
 
       <div className="grid grid-cols-2 gap-2.5">
         <Field label="Take at net profit ($)" value={s.min_net_profit} step={0.5} onChange={(v) => set({ min_net_profit: v })} />
+        <Field
+          label="Min profit floor (× cost)"
+          hint="Net profit must also beat N × (spread + commission)"
+          value={s.min_cost_multiple ?? 2.0}
+          step={0.5}
+          min={0}
+          onChange={(v) => set({ min_cost_multiple: v })}
+        />
         <Field
           label="Max loss per trade (× take)"
           hint={`= $${maxLoss.toFixed(2)} incl. commission; lot is sized to fit`}

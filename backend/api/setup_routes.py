@@ -51,6 +51,8 @@ class ModelListRequest(BaseModel):
 
 class SupervisorSetupRequest(BaseModel):
     enabled: bool | None = None
+    mode: Literal["periodic", "hybrid", "per_trade"] | None = None
+    brief_interval_min: int | None = Field(default=None, ge=1, le=240)
     timeout_s: float | None = Field(default=None, ge=1.0, le=60.0)
     use_fast_model: bool | None = None
     effort: Literal["low", "medium", "high"] | None = None
@@ -66,6 +68,7 @@ class ExitSetupRequest(BaseModel):
     trail_start_r: float | None = Field(default=None, ge=0.2, le=5.0)
     trail_dist_r: float | None = Field(default=None, ge=0.05, le=3.0)
     hit_min_net_profit: float | None = Field(default=None, ge=0.0, le=100.0)
+    hit_min_cost_multiple: float | None = Field(default=None, ge=0.0, le=10.0)
     hit_own_stop: bool | None = None
     hit_max_loss_mult: float | None = Field(default=None, ge=1.0, le=20.0)
     hit_sl_atr_mult: float | None = Field(default=None, ge=0.2, le=5.0)
@@ -78,6 +81,8 @@ class ExitSetupRequest(BaseModel):
 class FilterSetupRequest(BaseModel):
     htf_mode: Literal["off", "on", "auto"] | None = None
     htf_timeframe: Literal["M15", "H1", "BOTH"] | None = None
+    trend_strategies_require_htf: bool | None = None
+    block_breakout_in_ranging: bool | None = None
     session_mode: Literal["off", "on", "auto"] | None = None
     blocked_sessions: list[Literal["asia", "london", "overlap", "newyork", "late"]] | None = None
     ichimoku_mode: Literal["off", "on", "auto"] | None = None
@@ -296,4 +301,9 @@ def register_setup_routes(api: APIRouter, orch: TradingOrchestrator, env_path: s
         orch.config.supervisor = new
         orch.apply_supervisor_config()
         save_local_config("supervisor", new.model_dump())
+        return {"supervisor": supervisor_view()}
+
+    @api.post("/setup/supervisor/brief")
+    async def refresh_supervisor_brief() -> dict[str, Any]:
+        await orch.refresh_supervisor_brief(force=True)
         return {"supervisor": supervisor_view()}

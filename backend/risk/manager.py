@@ -126,13 +126,15 @@ class PortfolioRiskManager:
         risk_pct: float,
         sl_distance_price: float,
         spec: SymbolSpec,
+        commission_per_lot: float | None = None,
     ) -> float:
         """Compute exact broker-compliant lot size strictly from live tick_value and tick_size."""
         if equity <= 0 or sl_distance_price <= 0 or spec.tick_size <= 0 or spec.tick_value <= 0:
             return 0.0
         risk_money = equity * (risk_pct / 100.0)
         ticks_at_risk = sl_distance_price / spec.tick_size
-        loss_per_lot = ticks_at_risk * spec.tick_value + spec.commission_per_lot
+        comm = spec.commission_per_lot if commission_per_lot is None else max(0.0, float(commission_per_lot))
+        loss_per_lot = ticks_at_risk * spec.tick_value + comm
         if loss_per_lot <= 0:
             return 0.0
         raw_lots = risk_money / loss_per_lot
@@ -156,6 +158,7 @@ class PortfolioRiskManager:
         ml_probability: float,
         bandit_weight: float,
         now_ts: int,
+        commission_per_lot: float | None = None,
     ) -> RiskDecision:
         if self.killed:
             return RiskDecision(False, reason_code="KILL_SWITCH_ACTIVE", detail="Global Kill-Switch locked")
@@ -228,8 +231,20 @@ class PortfolioRiskManager:
             adj_sl = round(entry + sl_dist, spec.digits)
             adj_tp = round(entry - tp_dist, spec.digits)
 
+        # Total Cost-to-Risk Gate: prevents tight M1 stops where broker commission + spread eat 30-50%+ of risk!
+        eff_comm = spec.commission_per_lot if commission_per_lot is None else max(0.0, float(commission_per_lot))
+        money_per_px = (spec.tick_value / spec.tick_size) if spec.tick_size > 0 else 0.0
+        comm_px = (eff_comm / money_per_px) if money_per_px > 0 else 0.0
+        cost_to_risk = (spread_price + comm_px) / max(sl_dist, 1e-12)
+        if self.config.max_cost_to_risk_ratio > 0 and cost_to_risk > self.config.max_cost_to_risk_ratio:
+            return RiskDecision(
+                False,
+                reason_code="COST_TO_RISK_GATE",
+                detail=f"Spread+commission is {cost_to_risk:.0%} of SL risk > max {self.config.max_cost_to_risk_ratio:.0%} (SL too tight for broker costs)",
+            )
+
         risk_pct = self.compute_dynamic_risk_pct(ml_probability, bandit_weight)
-        lots = self.calculate_lot_from_spec(account.equity, risk_pct, sl_dist, spec)
+        lots = self.calculate_lot_from_spec(account.equity, risk_pct, sl_dist, spec, commission_per_lot=eff_comm)
         if lots <= 0:
             return RiskDecision(
                 False,
@@ -244,5 +259,5 @@ class PortfolioRiskManager:
             adjusted_tp=adj_tp,
             risk_pct_used=risk_pct,
             reason_code="APPROVED",
-            detail=f"Lot {lots:.2f} | Risk {risk_pct:.2f}% | Spread/ATR {spread_atr:.2f}",
+            detail=f"Lot {lots:.2f} | Risk {risk_pct:.2f}% | Spread/ATR {spread_atr:.2f} | Cost/SL {cost_to_risk:.0%}",
         )

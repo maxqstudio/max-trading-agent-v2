@@ -189,6 +189,7 @@ class BridgeSyncRequest(BaseModel):
     account: AccountState
     ticks: list[TickSnapshot] = Field(default_factory=list)
     closed_bars: list[Bar] = Field(default_factory=list)
+    history_bars: list[Bar] = Field(default_factory=list)  # Startup backfill: stored & buffered, never traded live
     positions: list[LivePosition] = Field(default_factory=list)
     symbol_specs: list[SymbolSpec] = Field(default_factory=list)
     acks: list[OrderAck] = Field(default_factory=list)

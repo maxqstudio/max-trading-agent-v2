@@ -6,6 +6,7 @@ export const RiskConfigView: React.FC<{ onToast: (msg: string) => void }> = ({ o
   const [riskPct, setRiskPct] = useState(0.5);
   const [maxDd, setMaxDd] = useState(3.0);
   const [spAtr, setSpAtr] = useState(0.3);
+  const [costRisk, setCostRisk] = useState(0.18);
   const [maxPos, setMaxPos] = useState(3);
   const [mlProb, setMlProb] = useState(0.56);
 
@@ -15,6 +16,7 @@ export const RiskConfigView: React.FC<{ onToast: (msg: string) => void }> = ({ o
       setRiskPct(c.risk.risk_per_trade_pct);
       setMaxDd(c.risk.max_daily_drawdown_pct);
       setSpAtr(c.risk.max_spread_atr_ratio);
+      setCostRisk(c.risk.max_cost_to_risk_ratio ?? 0.18);
       setMaxPos(c.risk.max_concurrent_positions);
       setMlProb(c.ai.ml_min_probability);
     }).catch(() => {});
@@ -25,6 +27,7 @@ export const RiskConfigView: React.FC<{ onToast: (msg: string) => void }> = ({ o
       risk_per_trade_pct: riskPct,
       max_daily_drawdown_pct: maxDd,
       max_spread_atr_ratio: spAtr,
+      max_cost_to_risk_ratio: costRisk,
       max_concurrent_positions: maxPos,
       ml_min_probability: mlProb,
     });
@@ -59,7 +62,14 @@ export const RiskConfigView: React.FC<{ onToast: (msg: string) => void }> = ({ o
               <span className="text-[#8A9BB5]">Max Concurrent Positions</span>
               <input type="number" value={maxPos} onChange={(e) => setMaxPos(Number(e.target.value))} className="w-full mono font-bold bg-transparent border-b border-[#1F2D45] py-0.5 focus:outline-none" />
             </label>
-            <label className="p-2.5 rounded cockpit-sub space-y-1 sm:col-span-2">
+            <label
+              className="p-2.5 rounded cockpit-sub space-y-1"
+              title="Blocks trades where (spread + round-trip broker commission) exceeds this fraction of SL distance"
+            >
+              <span className="text-[#8A9BB5]">Max Total Cost / SL Risk Ratio</span>
+              <input type="number" step="0.01" value={costRisk} onChange={(e) => setCostRisk(Number(e.target.value))} className="w-full mono font-bold bg-transparent border-b border-[#1F2D45] py-0.5 focus:outline-none" />
+            </label>
+            <label className="p-2.5 rounded cockpit-sub space-y-1">
               <span className="text-[#8A9BB5]">Calibrated ML Min Win Probability Cutoff</span>
               <input type="number" step="0.01" value={mlProb} onChange={(e) => setMlProb(Number(e.target.value))} className="w-full mono font-bold bg-transparent border-b border-[#1F2D45] py-0.5 focus:outline-none" />
             </label>

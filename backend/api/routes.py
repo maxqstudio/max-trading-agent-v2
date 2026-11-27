@@ -18,6 +18,7 @@ class RiskUpdateRequest(BaseModel):
     risk_per_trade_pct: float | None = None
     max_daily_drawdown_pct: float | None = None
     max_spread_atr_ratio: float | None = None
+    max_cost_to_risk_ratio: float | None = None
     max_concurrent_positions: int | None = None
     max_usd_correlated_positions: int | None = None
     consecutive_loss_cooldown_min: int | None = None
@@ -241,6 +242,7 @@ def create_app(orchestrator: TradingOrchestrator) -> FastAPI:
             "risk_per_trade_pct": "risk.risk_per_trade_pct",
             "max_daily_drawdown_pct": "risk.max_daily_drawdown_pct",
             "max_spread_atr_ratio": "risk.max_spread_atr_ratio",
+            "max_cost_to_risk_ratio": "risk.max_cost_to_risk_ratio",
             "max_concurrent_positions": "risk.max_concurrent_positions",
             "max_usd_correlated_positions": "risk.max_usd_correlated_positions",
             "consecutive_loss_cooldown_min": "risk.consecutive_loss_cooldown_min",

@@ -1,13 +1,15 @@
-"""Claude as the trade supervisor: a fast veto layer on top of the quant engine.
+"""AI Supervisor: fast veto or zero-drift periodic Macro/Regime desk brief on top of the quant engine.
 
 The quant stack (strategies -> bandit -> ML meta-labeler -> risk manager) proposes a fully
-sized trade. The supervisor may APPROVE it, REDUCE its size, or REJECT it. It can never
+sized trade. The AI Supervisor may APPROVE it, REDUCE its size, or REJECT it. It can never
 increase size, move stops, or open a trade the quant stack did not propose.
 
-Built for M1 scalping:
-- one LLM call, no tool round-trips, compact context, fast model + low effort by default
-- hard timeout; on timeout / error / over budget the policy decides (default: skip the trade)
-- runs off the bridge loop, so the EA never waits on the model
+Modes:
+- periodic (default for M1 scalping): refreshes a structured DeskBrief per symbol every N minutes
+  in the background (LONG_ONLY / SHORT_ONLY / BOTH / FLAT, risk_multiplier, avoid_strategies) and
+  evaluates entries in <0.1ms with ZERO latency drift or adverse selection.
+- hybrid: uses instant DeskBrief for fast M1 strategies and per-trade LLM review for slow structural setups.
+- per_trade: one fast LLM call per setup with hard timeout and price-drift re-check.
 """
 
 from __future__ import annotations
@@ -28,6 +30,65 @@ from backend.llm.router import LLMRouter
 log = logging.getLogger("max_agent.supervisor")
 
 Decision = Literal["APPROVE", "REDUCE", "REJECT"]
+Bias = Literal["BOTH", "LONG_ONLY", "SHORT_ONLY", "FLAT"]
+SupervisorMode = Literal["periodic", "hybrid", "per_trade"]
+SLOW_STRUCTURAL_STRATEGIES = frozenset({"structure_shift", "day_range_reversal"})
+
+DESK_BRIEF_SYSTEM = """You are the Macro & Regime Desk Supervisor for an automated MT5 M1-M5 scalping desk (XAUUSD, EURUSD, GBPUSD, USDJPY).
+
+Every 15 minutes you review a compact multi-symbol market digest (M15/H1 trend, M15 Ichimoku score, regime, volatility ratio, spread-to-ATR, recent P&L, and upcoming high-impact news) and set a trading desk directive per symbol.
+
+Your directives apply instantaneously (<0.1ms) at entry time so fast M1 trades suffer ZERO API latency or adverse selection.
+
+Per symbol, choose:
+- bias:
+  - BOTH: normal two-way scalping allowed
+  - LONG_ONLY: only buy setups allowed (clear bullish M15/H1 structure)
+  - SHORT_ONLY: only sell setups allowed (clear bearish M15/H1 structure)
+  - FLAT: block all new entries on this symbol (extreme chop, wide spread, imminent macro risk, or heavy losing streak)
+- risk_multiplier: 0.25 to 1.0 (never > 1.0; lower when DD is elevated or conditions are messy)
+- avoid_strategies: optional list of strategy IDs to disable temporarily on this symbol (e.g. ["micro_breakout"] in ranging chop)
+- reason: one concise sentence (<18 words) explaining the desk view.
+"""
+
+DESK_BRIEF_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["summary", "symbols"],
+    "properties": {
+        "summary": {"type": "string"},
+        "symbols": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["symbol", "bias", "risk_multiplier", "avoid_strategies", "reason"],
+                "properties": {
+                    "symbol": {"type": "string"},
+                    "bias": {"type": "string", "enum": ["BOTH", "LONG_ONLY", "SHORT_ONLY", "FLAT"]},
+                    "risk_multiplier": {"type": "number"},
+                    "avoid_strategies": {"type": "array", "items": {"type": "string"}},
+                    "reason": {"type": "string"},
+                },
+            },
+        },
+    },
+}
+
+
+class SymbolBrief(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    symbol: str
+    bias: Bias = "BOTH"
+    risk_multiplier: float = 1.0
+    avoid_strategies: list[str] = []
+    reason: str = ""
+
+
+class DeskBriefAnswer(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    summary: str = ""
+    symbols: list[SymbolBrief] = []
 
 SUPERVISOR_SYSTEM = """You are the final pre-trade supervisor for an aggressive automated M1 scalping system on MT5 (XAUUSD, EURUSD, GBPUSD, USDJPY).
 
@@ -81,6 +142,8 @@ class SupervisorAnswer(BaseModel):
 @dataclass(slots=True)
 class SupervisorSettings:
     enabled: bool = True
+    mode: SupervisorMode = "per_trade"
+    brief_interval_min: int = 15
     timeout_s: float = 6.0
     use_fast_model: bool = True
     effort: str = "low"
@@ -228,6 +291,107 @@ class TradeSupervisor:
         self._budget = _Budget()
         self.stats = {"calls": 0, "approve": 0, "reduce": 0, "reject": 0, "unavailable": 0}
         self.last: dict[str, Any] = {}  # latest verdict, shown live on the dashboard
+        self.brief: dict[str, SymbolBrief] = {}
+        self.brief_summary: str = ""
+        self.brief_updated_ts: float = 0.0
+        self.brief_provider: str = ""
+        self.brief_error: str = ""
+
+    def uses_per_trade_review(self, strategy_id: str) -> bool:
+        if self.settings.mode == "per_trade":
+            return True
+        if self.settings.mode == "hybrid":
+            return strategy_id in SLOW_STRUCTURAL_STRATEGIES
+        return False
+
+    def brief_is_due(self, now: float | None = None) -> bool:
+        if not self.active or self.settings.mode == "per_trade":
+            return False
+        t = time.time() if now is None else now
+        interval = max(60.0, float(self.settings.brief_interval_min) * 60.0)
+        return self.brief_updated_ts == 0.0 or (t - self.brief_updated_ts) >= interval
+
+    async def refresh_brief(self, market_digest: str) -> dict[str, SymbolBrief]:
+        """Periodic background LLM call returning a per-symbol DeskBrief (zero entry-time latency)."""
+        why = self._over_budget()
+        if why:
+            self.brief_error = why
+            return self.brief
+        self._budget.calls.append(time.time())
+        self.stats["calls"] += 1
+        req = LLMRequest(
+            task="supervisor_brief",
+            system=DESK_BRIEF_SYSTEM,
+            user=market_digest,
+            schema=DESK_BRIEF_SCHEMA,
+            timeout_s=max(self.settings.timeout_s, 15.0),
+            fast=self.settings.use_fast_model,
+            max_tokens=2000,
+            effort=self.settings.effort,
+        )
+        try:
+            res, ans = await self.router.complete(req, validate=DeskBriefAnswer.model_validate)
+        except Exception as exc:
+            log.warning("AI Supervisor desk brief failed: %s", exc)
+            self.brief_error = str(exc)[:160]
+            self.stats["unavailable"] += 1
+            return self.brief
+        if res.cost_usd:
+            self._budget.spent_usd += res.cost_usd
+        cleaned: dict[str, SymbolBrief] = {}
+        for item in ans.symbols:
+            mult = item.risk_multiplier if math.isfinite(item.risk_multiplier) else 1.0
+            mult = max(self.settings.min_reduce_multiplier, min(1.0, mult))
+            cleaned[item.symbol.upper()] = SymbolBrief(
+                symbol=item.symbol.upper(),
+                bias=item.bias,
+                risk_multiplier=round(mult, 2),
+                avoid_strategies=[s.strip() for s in item.avoid_strategies if s.strip()],
+                reason=item.reason[:180],
+            )
+        self.brief = cleaned
+        self.brief_summary = ans.summary[:240]
+        self.brief_updated_ts = time.time()
+        self.brief_provider = f"{res.provider}:{res.model}"
+        self.brief_error = ""
+        return self.brief
+
+    def evaluate_from_brief(self, symbol: str, side: Side, strategy_id: str) -> SupervisorVerdict:
+        """Instantaneous (<0.1ms) pre-trade evaluation using the latest periodic DeskBrief."""
+        sym = symbol.upper()
+        sb = self.brief.get(sym)
+        max_age = max(1800.0, float(self.settings.brief_interval_min) * 180.0)
+        stale = self.brief_updated_ts > 0 and (time.time() - self.brief_updated_ts) > max_age
+
+        if sb is None or stale:
+            if self.brief_error and self.settings.on_unavailable == "block":
+                return self._unavailable(f"desk brief unavailable: {self.brief_error}")
+            verdict = SupervisorVerdict(
+                "APPROVE", 1.0, "Desk brief pending — allowed at full size", confidence=0.5, provider=self.brief_provider or "brief"
+            )
+            self.stats["approve"] += 1
+            return self._remember(verdict)
+
+        reason = sb.reason or f"Desk brief {sb.bias}"
+        if sb.bias == "FLAT":
+            self.stats["reject"] += 1
+            return self._remember(SupervisorVerdict("REJECT", 0.0, f"Desk brief FLAT: {reason}", confidence=0.85, provider=self.brief_provider))
+        if sb.bias == "LONG_ONLY" and side == Side.SELL:
+            self.stats["reject"] += 1
+            return self._remember(SupervisorVerdict("REJECT", 0.0, f"Desk brief LONG_ONLY: {reason}", confidence=0.85, provider=self.brief_provider))
+        if sb.bias == "SHORT_ONLY" and side == Side.BUY:
+            self.stats["reject"] += 1
+            return self._remember(SupervisorVerdict("REJECT", 0.0, f"Desk brief SHORT_ONLY: {reason}", confidence=0.85, provider=self.brief_provider))
+        if strategy_id in sb.avoid_strategies:
+            self.stats["reject"] += 1
+            return self._remember(SupervisorVerdict("REJECT", 0.0, f"Desk brief avoids {strategy_id}: {reason}", confidence=0.8, provider=self.brief_provider))
+        if sb.risk_multiplier < 0.95:
+            mult = max(self.settings.min_reduce_multiplier, min(0.9, sb.risk_multiplier))
+            self.stats["reduce"] += 1
+            return self._remember(SupervisorVerdict("REDUCE", mult, f"Desk brief risk {mult:.2f}x: {reason}", confidence=0.75, provider=self.brief_provider))
+
+        self.stats["approve"] += 1
+        return self._remember(SupervisorVerdict("APPROVE", 1.0, f"Desk brief {sb.bias}: {reason}", confidence=0.8, provider=self.brief_provider))
 
     @property
     def active(self) -> bool:
@@ -312,6 +476,11 @@ class TradeSupervisor:
         return {
             "active": self.active,
             "enabled": s.enabled,
+            "mode": s.mode,
+            "brief_interval_min": s.brief_interval_min,
+            "brief_updated_ts": int(self.brief_updated_ts),
+            "brief_summary": self.brief_summary,
+            "brief": {k: v.model_dump() for k, v in self.brief.items()},
             "timeout_s": s.timeout_s,
             "fast_model": s.use_fast_model,
             "effort": s.effort,

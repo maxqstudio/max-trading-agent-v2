@@ -264,6 +264,12 @@ class Database:
             results.append(TradeRecord.model_validate(d))
         return results
 
+    async def clear_paper_trades(self) -> int:
+        """Delete virtual paper & shadow trades while keeping real MT5 trades and bar history intact."""
+        cur = await self.conn.execute("DELETE FROM trades WHERE version_id LIKE 'PAPER%' OR is_shadow = 1")
+        await self.conn.commit()
+        return int(cur.rowcount or 0)
+
     async def save_decision(self, event: DecisionEvent) -> None:
         await self.conn.execute(
             """
