@@ -55,7 +55,7 @@ def register_paper_routes(api: APIRouter, orch: TradingOrchestrator) -> None:
         mt5 = await orch.db.list_trades(limit=5000, is_shadow=False, exclude_version_prefix="PAPER")
         rows.append({
             "book": "mt5",
-            "label": "MT5 (akun)",
+            "label": "MT5 (account)",
             "equity": orch.account.equity,
             "open_positions": len(orch.open_positions),
             **summarize(mt5, orch.account.balance or start),
@@ -63,7 +63,7 @@ def register_paper_routes(api: APIRouter, orch: TradingOrchestrator) -> None:
         return {
             "rows": rows,
             "ai_cost_today_usd": ai_cost,
-            "note": "Normal dan Hit & Run memakai setup yang sama (lolos risk + supervisor). Tanpa Veto membuka semua setup yang lolos risk, termasuk yang ditolak Claude.",
+            "note": "Normal and Hit & Run use the same setups (passed risk and supervisor). No Veto opens every setup that passed risk, including the ones Claude rejected.",
             "learning": {
                 "adaptive": orch.config.exits.adaptive,
                 "min_samples": orch.exit_selector.min_samples,

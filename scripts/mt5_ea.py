@@ -148,14 +148,14 @@ def install_into(term_dir: Path, code: str, token: str, metaeditor: Path | None,
 
     res = InstallResult(term_dir, action)
     if metaeditor is None:
-        res.notes.append("MetaEditor tidak ditemukan: buka MaxTradingBridge.mq5 di MetaEditor lalu tekan F7.")
+        res.notes.append("MetaEditor not found: open MaxTradingBridge.mq5 in MetaEditor and press Compile.")
         return res
     try:
         res.compiled, res.compile_summary = compile_ea(metaeditor, target, runner=runner)
     except Exception as exc:  # noqa: BLE001 - never block startup on a compile problem
         res.compiled, res.compile_summary = False, f"compile gagal dijalankan: {type(exc).__name__}"
     if not res.compiled:
-        res.notes.append(f"Compile belum berhasil. Buka {target} di MetaEditor lalu tekan F7.")
+        res.notes.append(f"Compile did not succeed. Open {target} in MetaEditor and press Compile.")
     return res
 
 
@@ -166,11 +166,11 @@ def ensure_ea(token: str, appdata: Path | None = None, source: Path = MQL5_SRC, 
             print(msg)
 
     if len(token) < 24:
-        say("  [WARN] BRIDGE_AUTH_TOKEN belum ada di .env, EA tidak dipasang.")
+        say("  [WARN] BRIDGE_AUTH_TOKEN missing from .env, EA not installed.")
         return []
     dirs = terminal_dirs(appdata)
     if not dirs:
-        say("  [WARN] Folder MetaTrader 5 tidak ditemukan. Buka MT5 sekali, lalu jalankan lagi.")
+        say("  [WARN] MetaTrader 5 folder not found. Open MT5 once, then run this again.")
         return []
     code = render_ea(source.read_text(encoding="utf-8"), token)
     results = []
@@ -178,12 +178,12 @@ def ensure_ea(token: str, appdata: Path | None = None, source: Path = MQL5_SRC, 
         try:
             r = install_into(d, code, token, find_metaeditor(d), runner=runner)
         except OSError as exc:
-            say(f"  [WARN] Gagal memasang EA di {d.name[:8]}…: {exc.strerror or exc}")
+            say(f"  [WARN] Could not install the EA in {d.name[:8]}…: {exc.strerror or exc}")
             continue
         results.append(r)
-        label = {"installed": "dipasang", "updated": "diperbarui", "up_to_date": "sudah versi terbaru"}[r.action]
+        label = {"installed": "installed", "updated": "updated", "up_to_date": "already up to date"}[r.action]
         comp = "" if r.action == "up_to_date" else (" + compiled" if r.compiled else "")
-        say(f"  [OK] EA {label}{comp} di terminal {d.name[:8]}…" + (f"  ({r.compile_summary})" if r.compile_summary else ""))
+        say(f"  [OK] EA {label}{comp} in terminal {d.name[:8]}…" + (f"  ({r.compile_summary})" if r.compile_summary else ""))
         for n in r.notes:
             say(f"       {n}")
     return results

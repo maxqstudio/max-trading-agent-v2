@@ -66,14 +66,14 @@ class ShadowPosition:
     mfe_r: float = 0.0
     version_id: str = "shadow"
     volume: float = 0.10
-    veto: str = ""  # Tanpa Veto book: what the supervisor said about this setup (evaluation only)
+    veto: str = ""  # No Veto book: what the supervisor said about this setup (evaluation only)
 
 
 PAPER_VERSION = "PAPER"  # Normal book (kept for journal compatibility)
 HITRUN_VERSION = "PAPER-HITRUN"
 RAW_VERSION = "PAPER-RAW"
 PAPER_BOOKS: dict[str, str] = {"normal": PAPER_VERSION, "hitrun": HITRUN_VERSION, "raw": RAW_VERSION}
-PAPER_LABELS: dict[str, str] = {"normal": "Normal", "hitrun": "Hit & Run", "raw": "Tanpa Veto"}
+PAPER_LABELS: dict[str, str] = {"normal": "Normal", "hitrun": "Hit & Run", "raw": "No Veto"}
 # Normal and Hit & Run open only what the supervisor allowed. "raw" opens every setup that
 # passed the risk checks, so the bandit and RL exit learn from all setups, not only approved ones.
 VETOED_BOOKS = ("normal", "hitrun")
@@ -380,7 +380,7 @@ class TradingOrchestrator:
             await self.db.save_trade(tr)
             self._recent_closed.append(tr)
             self.risk.record_trade_outcome(tr.pnl_money, now_sec)
-            # With paper on, the bandit and RL exit learn from the "Tanpa Veto" book instead, which
+            # With paper on, the bandit and RL exit learn from the "No Veto" book instead, which
             # sees every setup (MT5 only sees what the supervisor approved, and would double count).
             if not self.config.paper.enabled:
                 self.bandit.update(tr.symbol, tr.regime, tr.strategy_id, tr.pnl_r)
@@ -984,7 +984,7 @@ class TradingOrchestrator:
             await self._save_paper()
 
     async def _learn_from_unvetoed(self, p: ShadowPosition, r: float, pnl: float, now_sec: int) -> None:
-        """Online learning from a closed "Tanpa Veto" trade. The labels are market results only;
+        """Online learning from a closed "No Veto" trade. The labels are market results only;
         the supervisor's verdict is never a training target (it is only counted for the scoreboard)."""
         self.bandit.update(p.symbol, p.regime, p.strategy_id, r)
         moved_to_be = (p.sl >= p.entry_price) if p.side == Side.BUY else (0 < p.sl <= p.entry_price)
@@ -1081,7 +1081,7 @@ class TradingOrchestrator:
                     await self._log_decision(
                         DecisionEvent(
                             symbol=pos.symbol, category="EXEC", tag="HIT & RUN TAKE", strategy_id=meta.strategy_id,
-                            message=f"#{pos.ticket} ditutup di untung bersih ${net:.2f} (+{cur_r:.2f}R), Hit & Run dipilih untuk {pos.symbol} {meta.regime.value}",
+                            message=f"#{pos.ticket} closed at net profit ${net:.2f} ({cur_r:+.2f}R), Hit & Run chosen for {pos.symbol} {meta.regime.value}",
                         )
                     )
                 continue
@@ -1369,7 +1369,7 @@ class TradingOrchestrator:
                         tag=f"{name} {'UPDATED' if dec.get('adopted') else 'KEPT'}",
                         message=(
                             f"{name}: {'model baru dipakai' if dec.get('adopted') else 'champion lama dipertahankan'}"
-                            f"{' (lanjut dari weight champion)' if dec.get('warm_start') else ''}. {dec.get('reason', '')}. "
+                            f"{' (continued from the champion weights)' if dec.get('warm_start') else ''}. {dec.get('reason', '')}. "
                             f"Data: {max(n_bars.values())} bar M1 per pasar"
                         ),
                     )

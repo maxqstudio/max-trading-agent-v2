@@ -37,15 +37,15 @@ export const ForensicsView: React.FC<{ symbols: string[] }> = ({ symbols }) => {
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
             <h2 className="text-sm font-bold">Trade Forensics Journal (Click Row for MAE/MFE & RL Exit Trace)</h2>
-            <p className="text-xs text-[#8A9BB5]">Slippage aktual, komisi, skor AI saat entry, serta profil MAE/MFE</p>
+            <p className="text-xs text-[#8A9BB5]">Actual slippage, commission, AI scores at entry, and MAE/MFE profile</p>
           </div>
           <div className="flex gap-2 text-xs">
             <select value={mode} onChange={(e) => setMode(e.target.value)} className="px-2.5 py-1 rounded cockpit-sub">
-              <option value="ALL">Semua</option>
+              <option value="ALL">All</option>
               <option value="LIVE">MT5 (Demo/Live)</option>
               <option value="PAPER">Paper Normal</option>
               <option value="HITRUN">Paper Hit &amp; Run</option>
-              <option value="RAW">Paper Tanpa Veto</option>
+              <option value="RAW">Paper No Veto</option>
               <option value="SHADOW">Kandidat (Evolusi)</option>
             </select>
             <select value={sym} onChange={(e) => setSym(e.target.value)} className="px-2.5 py-1 rounded cockpit-sub mono">

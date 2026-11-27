@@ -52,12 +52,12 @@ def ask(prompt: str, default: str = "") -> str:
 
 
 def choose_chain(names: list[str]) -> list[str]:
-    print("\nProvider yang tersedia:")
+    print("\nAvailable providers:")
     for i, n in enumerate(names, 1):
         p = PRESETS[n]
         print(f"  {i:>2}. {p.label:<45} ({n})")
     default = ",".join(str(names.index(n) + 1) for n in DEFAULT_CHAIN)
-    raw = ask("\nPilih urutan provider (nomor dipisah koma, yang pertama dipakai duluan)", default)
+    raw = ask("\nProvider order (numbers separated by commas, the first one is used first)", default)
     picked: list[str] = []
     for part in raw.split(","):
         part = part.strip()
@@ -73,13 +73,13 @@ async def test_connections(chain: list[str]) -> None:
     schema = {"type": "object", "additionalProperties": False, "required": ["ok"], "properties": {"ok": {"type": "boolean"}}}
     for rp in resolved:
         if not rp.configured:
-            print(f"  [SKIP] {rp.name}: belum lengkap (key/model/base URL)")
+            print(f"  [SKIP] {rp.name}: incomplete (key/model/base URL)")
             continue
         req = LLMRequest(task="ping", system="Connectivity check.", user='Reply with {"ok": true}.', schema=schema,
                          timeout_s=30.0, max_tokens=1000, effort="low")
         try:
             res, _ = await LLMRouter(resolved=[rp]).complete(req)
-            print(f"  [OK]   {rp.name}: {res.model} menjawab dalam {res.latency_ms:.0f} ms")
+            print(f"  [OK]   {rp.name}: {res.model} answered in {res.latency_ms:.0f} ms")
         except Exception as exc:
             print(f"  [FAIL] {rp.name}: {str(exc)[:200]}")
 
@@ -94,13 +94,13 @@ def main() -> int:
         print(", ".join(names) if names else "none")
         return 0 if names else 1
     print("=" * 64)
-    print("  Max Trading Agent v2 — Setup LLM (Claude dulu)")
+    print("  Max Trading Agent v2 — LLM setup (Claude first)")
     print("=" * 64)
     content = read_env()
     names = list(PRESETS)
     chain = choose_chain(names)
     if not chain:
-        print("Tidak ada provider dipilih. LLM dimatikan (mode deterministik).")
+        print("No provider chosen. LLM turned off (deterministic mode).")
         content = set_value(content, "LLM_PROVIDER_CHAIN", "off")
         ENV_FILE.write_text(content, encoding="utf-8")
         return 0
@@ -110,7 +110,7 @@ def main() -> int:
         up = n.upper()
         print(f"\n--- {p.label} ---")
         if p.note:
-            print(f"  Catatan: {p.note}")
+            print(f"  Note: {p.note}")
         if n == "custom" or p.kind == "openai_compat" and not p.needs_key:
             base = ask("  Base URL", get_value(content, f"{up}_BASE_URL") or p.base_url)
             if base and base != p.base_url:
@@ -118,23 +118,23 @@ def main() -> int:
         if p.needs_key or n == "custom":
             existing = get_value(content, f"{up}_API_KEY")
             if p.key_url:
-                print(f"  Ambil API key di: {p.key_url}")
-            hint = f"(Enter = pakai yang lama ...{existing[-4:]})" if existing else "(Enter = lewati)"
-            key = getpass.getpass(f"  Tempel {up}_API_KEY {hint}: ").strip()
+                print(f"  Get an API key at: {p.key_url}")
+            hint = f"(Enter = keep ...{existing[-4:]})" if existing else "(Enter = skip)"
+            key = getpass.getpass(f"  Paste {up}_API_KEY {hint}: ").strip()
             if key:
                 content = set_value(content, f"{up}_API_KEY", key)
-        model = ask("  Model utama (refleksi)", get_value(content, f"{up}_MODEL") or p.default_model)
-        fast = ask("  Model cepat (supervisor scalping)", get_value(content, f"{up}_FAST_MODEL") or p.fast_model or model)
+        model = ask("  Main model (reflection)", get_value(content, f"{up}_MODEL") or p.default_model)
+        fast = ask("  Fast model (scalping supervisor)", get_value(content, f"{up}_FAST_MODEL") or p.fast_model or model)
         content = set_value(content, f"{up}_MODEL", model)
         content = set_value(content, f"{up}_FAST_MODEL", fast)
 
     content = set_value(content, "LLM_PROVIDER_CHAIN", ",".join(chain))
     ENV_FILE.write_text(content, encoding="utf-8")
-    print(f"\n[OK] Tersimpan di {ENV_FILE.name} (file ini tidak pernah ikut ke git).")
+    print(f"\n[OK] Saved to {ENV_FILE.name} (this file never goes to git).")
 
-    if ask("\nTes koneksi sekarang? (y/n)", "y").lower().startswith("y"):
+    if ask("\nTest the connection now? (y/n)", "y").lower().startswith("y"):
         asyncio.run(test_connections(chain))
-    print("\nSelesai. Restart server agar setelan baru dipakai.")
+    print("\nDone. Restart the server to use the new settings.")
     return 0
 
 

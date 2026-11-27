@@ -92,7 +92,7 @@ export default function App() {
       <header className="sticky top-0 z-30 bg-[#0A101B] border-b border-[#1F2D45] px-3.5 py-2 flex flex-wrap items-center justify-between gap-2.5">
         <div className="flex items-center gap-2.5 flex-wrap">
           <div className="flex items-center gap-2 pr-2.5 border-r border-[#1F2D45]">
-            <BullishLogo size={32} />
+            <BullishLogo size={36} />
             <div>
               <div className="flex items-center gap-1.5 leading-none">
                 <span className="font-bold tracking-wider text-xs">MAX QUANT</span>
@@ -100,7 +100,7 @@ export default function App() {
                   {state?.champion_version || 'v1.0'}
                 </span>
               </div>
-              <div className="text-xs text-[#8A9BB5] mt-0.5">Robot trading MT5</div>
+              <div className="text-xs text-[#8A9BB5] mt-0.5">MT5 trading robot</div>
             </div>
           </div>
 
@@ -110,12 +110,12 @@ export default function App() {
               const next = e.target.value;
               let code = '';
               if (next === 'MT5_LIVE') {
-                code = (window.prompt('UANG SUNGGUHAN. Ketik LIVE untuk konfirmasi:') || '').trim();
+                code = (window.prompt('REAL MONEY. Type LIVE to confirm:') || '').trim();
                 if (code.toUpperCase() !== 'LIVE') return;
               }
               try {
                 await api.setMode(next, code);
-                showToast(`Mode diganti ke ${human(next)}`);
+                showToast(`Mode switched to ${human(next)}`);
               } catch (err) {
                 showToast(`Mode change refused: ${(err as Error).message}`);
               }
@@ -183,7 +183,7 @@ export default function App() {
           <button
             onClick={async () => {
               if (state?.killed) {
-                const code = (window.prompt('Kill switch aktif. Ketik RELEASE untuk melepasnya (engine tetap PAUSE):') || '').trim();
+                const code = (window.prompt('Kill switch is on. Type RELEASE to release it (engine stays PAUSED):') || '').trim();
                 if (code.toUpperCase() !== 'RELEASE') return;
                 await api.releaseKill(code);
                 showToast('Kill switch released — engine still PAUSED');
@@ -265,8 +265,8 @@ export default function App() {
               <div className="flex justify-between"><span className="text-[#8A9BB5]">AI Scans</span><span className="mono font-bold">{state?.scans_count ?? 0}</span></div>
               <div className="flex justify-between"><span className="text-[#8A9BB5]">Paper Normal</span><span className="mono font-bold text-[#F59E0B]">${(state?.paper?.books?.normal?.equity ?? state?.paper?.equity ?? 10000).toFixed(0)}</span></div>
               <div className="flex justify-between"><span className="text-[#8A9BB5]">Paper Hit &amp; Run</span><span className="mono font-bold text-[#EC4899]">${(state?.paper?.books?.hitrun?.equity ?? 10000).toFixed(0)}</span></div>
-              <div className="flex justify-between" title="Semua setup yang lolos risk, termasuk yang ditolak Claude"><span className="text-[#8A9BB5]">Paper Tanpa Veto</span><span className="mono font-bold text-[#14B8A6]">${(state?.paper?.books?.raw?.equity ?? 10000).toFixed(0)}</span></div>
-              <div className="flex justify-between" title="Versi strategi hasil evolusi yang sedang diuji di samping (challenger)"><span className="text-[#8A9BB5]">Kandidat (Evolusi)</span><span className="mono font-bold text-[#8B5CF6]">${(state?.shadow_equity ?? 10000).toFixed(0)}</span></div>
+              <div className="flex justify-between" title="Every setup that passed risk, including the ones Claude rejected"><span className="text-[#8A9BB5]">Paper No Veto</span><span className="mono font-bold text-[#14B8A6]">${(state?.paper?.books?.raw?.equity ?? 10000).toFixed(0)}</span></div>
+              <div className="flex justify-between" title="Evolved strategy version being tested alongside (challenger)"><span className="text-[#8A9BB5]">Challenger (evolution)</span><span className="mono font-bold text-[#8B5CF6]">${(state?.shadow_equity ?? 10000).toFixed(0)}</span></div>
             </div>
           </div>
         </aside>
@@ -349,7 +349,7 @@ export default function App() {
                 <div className="xl:col-span-7 cockpit-card rounded-lg flex flex-col">
                   <div className="px-3 py-2 border-b border-[#1F2D45] flex items-center justify-between text-xs">
                     <span className="font-bold uppercase tracking-wider">
-                      Posisi MT5 ({state?.positions?.length ?? 0}){paperPositions.length ? ` + Paper (${paperPositions.length})` : ''}
+                      MT5 positions ({state?.positions?.length ?? 0}){paperPositions.length ? ` + Paper (${paperPositions.length})` : ''}
                     </span>
                     <span className={`mono font-bold ${floatingTotal >= 0 ? 'text-[#10B981]' : 'text-[#EF4444]'}`}>
                       Floating: {floatingTotal >= 0 ? '+' : ''}${floatingTotal.toFixed(2)}

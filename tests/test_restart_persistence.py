@@ -39,7 +39,7 @@ def test_paper_position_survives_restart_and_closes_into_journal(tmp_path: Path)
             risk = SimpleNamespace(volume=0.10, adjusted_sl=2645.0, adjusted_tp=2655.0)
             assess = SimpleNamespace(regime=MarketRegime.TRENDING_BULL)
             await orch._open_paper_position("XAUUSD", sig, risk, assess, orch.specs["XAUUSD"], 0.6, 0.55, 20.0)
-            # The "Tanpa Veto" book opens before the supervisor; here Claude rejected the setup.
+            # The "No Veto" book opens before the supervisor; here Claude rejected the setup.
             await orch._open_paper_position(
                 "XAUUSD", sig, risk, assess, orch.specs["XAUUSD"], 0.6, 0.55, 20.0, books=("raw",), veto="REJECT"
             )

@@ -35,8 +35,8 @@ function askForControlToken(): string {
   promptOpen = true;
   const t = (
     window.prompt(
-      'Dashboard butuh CONTROL_API_TOKEN dari file .env.\n' +
-        'start_all.bat sudah menyalinnya ke clipboard: tekan Ctrl+V lalu OK.',
+      'The dashboard needs CONTROL_API_TOKEN from the .env file.\n' +
+        'start_all.bat copied it to the clipboard: press Ctrl+V, then OK.',
     ) || ''
   ).trim();
   promptOpen = false;

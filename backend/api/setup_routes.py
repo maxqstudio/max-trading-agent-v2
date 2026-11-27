@@ -200,7 +200,7 @@ def register_setup_routes(api: APIRouter, orch: TradingOrchestrator, env_path: s
         if req.base_url and req.base_url.strip():
             rp = replace(rp, base_url=req.base_url.strip().rstrip("/"))
         if rp.preset.needs_key and not rp.api_key:
-            raise HTTPException(status_code=400, detail="Isi API key dulu")
+            raise HTTPException(status_code=400, detail="Enter an API key first")
         try:
             found = await list_models(rp)
         except ModelListError as exc:
@@ -218,7 +218,7 @@ def register_setup_routes(api: APIRouter, orch: TradingOrchestrator, env_path: s
         results = []
         for rp in targets:
             if not rp.configured:
-                results.append({"provider": rp.name, "ok": False, "error": "API key belum diisi"})
+                results.append({"provider": rp.name, "ok": False, "error": "API key not set"})
                 continue
             single = type(orch.llm)(resolved=[rp], factory=orch.llm.factory)
             ping = LLMRequest(

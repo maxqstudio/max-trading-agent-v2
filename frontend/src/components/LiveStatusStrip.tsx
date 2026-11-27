@@ -6,18 +6,18 @@ import { human, humanText } from '../labels';
 // Real-time status from the backend snapshot (replaces the old animated "engine loop").
 
 const BLOCK_LABELS: Record<string, string> = {
-  KILL_SWITCH_ACTIVE: 'Kill switch aktif',
-  SHADOW_ONLY_PAPER_MODE: 'Paper (tidak kirim order)',
-  LIVE_TRADING_NOT_ENABLED: 'Live terkunci (.env)',
-  REAL_ACCOUNT_NOT_AUTHORIZED: 'Akun real belum diizinkan',
+  KILL_SWITCH_ACTIVE: 'Kill switch on',
+  SHADOW_ONLY_PAPER_MODE: 'Paper (no orders sent)',
+  LIVE_TRADING_NOT_ENABLED: 'Live locked (.env)',
+  REAL_ACCOUNT_NOT_AUTHORIZED: 'Real account not allowed',
 };
 
 function ago(ts?: number): string {
   if (!ts) return '';
   const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
-  if (s < 60) return `${s}d lalu`;
-  if (s < 3600) return `${Math.round(s / 60)}m lalu`;
-  return `${Math.round(s / 3600)}j lalu`;
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  return `${Math.round(s / 3600)}h ago`;
 }
 
 const Chip: React.FC<{ icon: React.ElementType; label: string; tone: 'ok' | 'warn' | 'bad' | 'info'; children: React.ReactNode; title?: string }> = ({
@@ -53,29 +53,29 @@ export const LiveStatusStrip: React.FC<{ state: LiveStateSnapshot | null; onDemo
 
   return (
     <div className="bg-[#0E1522] border-b border-[#1F2D45] px-3.5 py-2 flex flex-wrap items-center gap-2 text-xs">
-      <Chip icon={Cable} label="MT5" tone={bridgeTone} title="Status koneksi EA MaxTradingBridge">
+      <Chip icon={Cable} label="MT5" tone={bridgeTone} title="MaxTradingBridge EA connection">
         {state?.bridge_connected
-          ? `terhubung · ${nSym} pasar · ${state?.bridge_latency_ms?.toFixed(0) ?? 0}ms`
-          : `terputus ${state?.bridge_stale_sec && state.bridge_stale_sec < 900 ? `(${state.bridge_stale_sec}s)` : ''}`}
+          ? `connected · ${nSym} markets · ${state?.bridge_latency_ms?.toFixed(0) ?? 0}ms`
+          : `disconnected ${state?.bridge_stale_sec && state.bridge_stale_sec < 900 ? `(${state.bridge_stale_sec}s)` : ''}`}
       </Chip>
 
-      <Chip icon={Lock} label="ENTRY" tone={gateTone} title="Apakah order baru boleh dikirim ke MT5 sekarang">
-        {block ? BLOCK_LABELS[block] || human(block) : `TERBUKA · ${human(state?.trading_mode ?? '')}`}
+      <Chip icon={Lock} label="ENTRY" tone={gateTone} title="Whether new orders may be sent to MT5 right now">
+        {block ? BLOCK_LABELS[block] || human(block) : `OPEN · ${human(state?.trading_mode ?? '')}`}
       </Chip>
 
       <Chip
         icon={Bot}
         label="AI"
         tone={llm?.enabled ? 'info' : 'warn'}
-        title={llm?.fallbacks?.length ? `Cadangan: ${llm.fallbacks.join(' → ')}` : 'Tidak ada provider cadangan'}
+        title={llm?.fallbacks?.length ? `Fallbacks: ${llm.fallbacks.join(' → ')}` : 'No fallback provider'}
       >
-        {llm?.enabled ? `${llm.provider} · ${llm.fast_model}${llm.fallbacks.length ? ` (+${llm.fallbacks.length} cadangan)` : ''}` : 'belum diisi (buka Setup)'}
+        {llm?.enabled ? `${llm.provider} · ${llm.fast_model}${llm.fallbacks.length ? ` (+${llm.fallbacks.length} fallback)` : ''}` : 'not set (open Setup)'}
       </Chip>
 
-      <Chip icon={Gavel} label="SUPERVISOR" tone={supTone} title="Keputusan Claude hari ini: setuju / kecilkan / tolak / gagal dihubungi">
+      <Chip icon={Gavel} label="SUPERVISOR" tone={supTone} title="Claude decisions today: approve / reduce / reject / unreachable">
         {sup?.active
           ? `✓${sup.approve} ↓${sup.reduce} ✗${sup.reject}${sup.unavailable ? ` ⚠${sup.unavailable}` : ''} · $${sup.spent_today_usd.toFixed(2)}/$${sup.daily_budget_usd.toFixed(0)}`
-          : 'nonaktif'}
+          : 'off'}
       </Chip>
 
       <div className="flex-1 min-w-[12rem] flex items-center gap-1.5 px-2 py-1 rounded border border-[#1F2D45] bg-[#121B2B] min-w-0">

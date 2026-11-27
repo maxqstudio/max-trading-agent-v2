@@ -44,10 +44,10 @@ interface Compare {
 
 const COLOR: Record<string, string> = { normal: '#F59E0B', hitrun: '#EC4899', raw: '#14B8A6', mt5: '#3B82F6' };
 const VERDICT: Record<string, string> = {
-  APPROVE: 'Disetujui Claude',
-  REDUCE: 'Dikecilkan Claude',
-  REJECT: 'Ditolak Claude',
-  NONE: 'Tanpa review',
+  APPROVE: 'Approved by Claude',
+  REDUCE: 'Reduced by Claude',
+  REJECT: 'Rejected by Claude',
+  NONE: 'Not reviewed',
 };
 const money = (v: number) => `${v >= 0 ? '+' : '-'}$${Math.abs(v).toFixed(2)}`;
 const signed = (v: number, d = 2) => `${v >= 0 ? '+' : ''}${v.toFixed(d)}`;
@@ -95,18 +95,18 @@ export const PaperCompare: React.FC = () => {
     <div className="cockpit-card rounded-lg">
       <div className="px-3 py-2 border-b border-[#1F2D45] flex flex-wrap items-center justify-between gap-2 text-xs">
         <span className="font-bold uppercase tracking-wider flex items-center gap-1.5">
-          <Scale className="w-3.5 h-3.5 text-[#06B6D4]" /> Perbandingan Pola: Normal vs Hit &amp; Run
+          <Scale className="w-3.5 h-3.5 text-[#06B6D4]" /> Exit styles: Normal vs Hit &amp; Run
         </span>
         <span className="mono text-[#8A9BB5]" title={data?.note}>
-          Biaya AI hari ini ${data?.ai_cost_today_usd?.toFixed(2) ?? '0.00'} (dipakai bersama)
+          AI cost today ${data?.ai_cost_today_usd?.toFixed(2) ?? '0.00'} (shared)
         </span>
       </div>
-      {err ? <div className="px-3 py-2 text-xs text-[#EF4444]">Gagal memuat: {err}</div> : null}
+      {err ? <div className="px-3 py-2 text-xs text-[#EF4444]">Could not load: {err}</div> : null}
       <div className="overflow-x-auto p-2">
         <table className="w-full text-xs text-left border-collapse">
           <thead>
             <tr className="border-b border-[#1F2D45] text-[#8A9BB5]">
-              <th className="py-1.5 px-2">Pola</th>
+              <th className="py-1.5 px-2">Book</th>
               <th className="py-1.5 px-2 text-right">Equity</th>
               <th className="py-1.5 px-2 text-right">Trade</th>
               <th className="py-1.5 px-2 text-right">Win rate</th>
@@ -115,8 +115,8 @@ export const PaperCompare: React.FC = () => {
               <th className="py-1.5 px-2 text-right">Avg win / loss</th>
               <th className="py-1.5 px-2 text-right">Avg R</th>
               <th className="py-1.5 px-2 text-right">Max DD</th>
-              <th className="py-1.5 px-2 text-right" title="Trade rugi yang sempat profit minimal +0.5R">
-                Untung → rugi
+              <th className="py-1.5 px-2 text-right" title="Losing trades that were at least +0.5R in profit first">
+                Profit → loss
               </th>
             </tr>
           </thead>
@@ -125,7 +125,7 @@ export const PaperCompare: React.FC = () => {
               <tr key={r.book} className={r.book === 'mt5' ? 'text-[#8A9BB5]' : ''}>
                 <td className="py-1.5 px-2 font-sans font-bold whitespace-nowrap" style={{ color: COLOR[r.book] }}>
                   {r.label}
-                  {best === r.book ? <span className="ml-1.5 px-1 rounded bg-[#10B981]/15 text-[#10B981] text-[10px]">unggul</span> : null}
+                  {best === r.book ? <span className="ml-1.5 px-1 rounded bg-[#10B981]/15 text-[#10B981] text-[10px]">leading</span> : null}
                   {r.open_positions ? <span className="ml-1.5 text-[#8A9BB5] font-normal">({r.open_positions} open)</span> : null}
                 </td>
                 <td className="py-1.5 px-2 text-right">${r.equity.toFixed(0)}</td>
@@ -142,7 +142,7 @@ export const PaperCompare: React.FC = () => {
             {!data && !err ? (
               <tr>
                 <td colSpan={10} className="py-4 text-center text-[#8A9BB5] font-sans">
-                  Memuat...
+                  Loading...
                 </td>
               </tr>
             ) : null}
@@ -152,18 +152,18 @@ export const PaperCompare: React.FC = () => {
 
       <div className="px-3 py-2 border-t border-[#1F2D45] text-xs space-y-2">
         <div className="font-bold flex items-center gap-1.5">
-          <Brain className="w-3.5 h-3.5 text-[#14B8A6]" /> Akurasi veto Claude (dari buku Tanpa Veto)
+          <Brain className="w-3.5 h-3.5 text-[#14B8A6]" /> Claude veto accuracy (from the No Veto book)
         </div>
         <p className="text-[#8A9BB5]">
-          Buku Tanpa Veto membuka semua setup yang lolos risk, termasuk yang ditolak Claude. Bandit dan RL exit belajar dari hasil pasar buku
-          ini, bukan dari keputusan Claude. Tabel ini hanya menilai: kalau setup yang ditolak hasilnya lebih jelek, veto-nya membantu.
+          The No Veto book opens every setup that passed risk, including the ones Claude rejected. The bandit and RL exit learn from this
+          book's market results, never from Claude's decisions. This table only scores the veto: if rejected setups do worse, the veto helps.
         </p>
         {veto.length ? (
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse">
               <thead>
                 <tr className="border-b border-[#1F2D45] text-[#8A9BB5]">
-                  <th className="py-1 px-2">Keputusan</th>
+                  <th className="py-1 px-2">Decision</th>
                   <th className="py-1 px-2 text-right">Trade</th>
                   <th className="py-1 px-2 text-right">Win rate</th>
                   <th className="py-1 px-2 text-right">Avg R</th>
@@ -185,46 +185,46 @@ export const PaperCompare: React.FC = () => {
             {rej && ok ? (
               <p className="mt-1 font-bold" style={{ color: rej.avg_r < ok.avg_r ? '#10B981' : '#F59E0B' }}>
                 {rej.avg_r < ok.avg_r
-                  ? `Veto membantu: setup yang ditolak rata-rata ${signed(rej.avg_r)}R, yang disetujui ${signed(ok.avg_r)}R.`
-                  : `Veto belum terbukti membantu: setup yang ditolak rata-rata ${signed(rej.avg_r)}R, yang disetujui ${signed(ok.avg_r)}R.`}
+                  ? `The veto helps: rejected setups average ${signed(rej.avg_r)}R, approved ones ${signed(ok.avg_r)}R.`
+                  : `The veto has not helped yet: rejected setups average ${signed(rej.avg_r)}R, approved ones ${signed(ok.avg_r)}R.`}
               </p>
             ) : null}
           </div>
         ) : (
-          <p className="text-[#8A9BB5]">Belum ada trade Tanpa Veto yang selesai.</p>
+          <p className="text-[#8A9BB5]">No closed No Veto trades yet.</p>
         )}
       </div>
 
       <div className="px-3 py-2 border-t border-[#1F2D45] text-xs space-y-2">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <span className="font-bold flex items-center gap-1.5">
-            <Brain className="w-3.5 h-3.5 text-[#8B5CF6]" /> Belajar gaya exit per pasar &amp; kondisi
+            <Brain className="w-3.5 h-3.5 text-[#8B5CF6]" /> Exit style learning per market &amp; regime
           </span>
           <button
             disabled={!data || busy}
             onClick={toggleAdaptive}
-            title="Kalau aktif, posisi MT5 memakai gaya exit pemenang untuk pasar + kondisi itu. Kalau mati, MT5 selalu Normal."
+            title="When on, MT5 positions use the winning exit style for that market and regime. When off, MT5 always uses Normal."
             className={`px-2 py-0.5 rounded border font-bold cursor-pointer disabled:opacity-50 ${
               data?.learning.adaptive ? 'border-[#10B981]/50 text-[#10B981] bg-[#10B981]/10' : 'border-[#1F2D45] text-[#8A9BB5]'
             }`}
           >
-            Terapkan ke MT5: {data?.learning.adaptive ? 'AKTIF' : 'MATI'}
+            Apply to MT5: {data?.learning.adaptive ? 'ON' : 'OFF'}
           </button>
         </div>
         <p className="text-[#8A9BB5]">
-          Hit &amp; Run menutup posisi begitu untung bersih (sudah dipotong spread, komisi, swap) dengan SL tetap sebagai batas rugi. Dua pola membuka setup yang sama, jadi setiap trade yang selesai adalah perbandingan langsung. Gaya pemenang baru dipakai di MT5
-          setelah masing-masing punya minimal {data?.learning.min_samples ?? 20} trade di grup itu dan Hit &amp; Run jelas lebih baik. Sebelum
-          itu MT5 tetap Normal.
+          Hit &amp; Run closes as soon as the trade is in net profit (after spread, commission and swap), with its own tighter SL as the loss
+          limit. Both books open the same setups, so every closed trade is a direct comparison. MT5 switches to the winner only after each
+          style has at least {data?.learning.min_samples ?? 20} trades in that group and Hit &amp; Run is clearly better. Until then MT5 uses Normal.
         </p>
         {groups.length ? (
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse">
               <thead>
                 <tr className="border-b border-[#1F2D45] text-[#8A9BB5]">
-                  <th className="py-1 px-2">Pasar · kondisi</th>
+                  <th className="py-1 px-2">Market · regime</th>
                   <th className="py-1 px-2 text-right">Normal (n · avg R · WR)</th>
                   <th className="py-1 px-2 text-right">Hit &amp; Run (n · avg R · WR)</th>
-                  <th className="py-1 px-2 text-right">Pilihan</th>
+                  <th className="py-1 px-2 text-right">Pick</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#1F2D45] mono">
@@ -238,7 +238,7 @@ export const PaperCompare: React.FC = () => {
                       {g.hitrun_n} · {signed(g.hitrun_avg_r)} · {g.hitrun_wr.toFixed(0)}%
                     </td>
                     <td className="py-1 px-2 text-right font-bold" style={{ color: g.pick ? COLOR[g.pick] : '#8A9BB5' }}>
-                      {g.pick === 'hitrun' ? 'Hit & Run' : g.pick === 'normal' ? 'Normal' : `butuh ${g.need} lagi`}
+                      {g.pick === 'hitrun' ? 'Hit & Run' : g.pick === 'normal' ? 'Normal' : `needs ${g.need} more`}
                     </td>
                   </tr>
                 ))}
@@ -246,7 +246,7 @@ export const PaperCompare: React.FC = () => {
             </table>
           </div>
         ) : (
-          <p className="text-[#8A9BB5]">Belum ada trade paper yang selesai.</p>
+          <p className="text-[#8A9BB5]">No closed paper trades yet.</p>
         )}
       </div>
 

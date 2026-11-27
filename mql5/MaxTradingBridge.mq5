@@ -552,12 +552,12 @@ void AddSymbol(const string logical, const string broker) {
 }
 
 string SyncErrorHint(const int code, const int err) {
-   if(code == -1 && err == 4014) return "URL belum diizinkan. Tools > Options > Expert Advisors > Allow WebRequest, tambah http://127.0.0.1:8765";
-   if(code == -1 && (err == 5203 || err == 4060)) return "Robot (backend) tidak bisa dihubungi. Jalankan start_all.bat dulu";
-   if(code == 401 || code == 403) return "Token salah. Isi BridgeAuthToken = BRIDGE_AUTH_TOKEN dari .env, atau jalankan start_all.bat lagi";
-   if(code == 422) return "Data ditolak backend (422). Perbarui repo dan EA";
-   if(code == 503) return "Backend belum siap / token server lemah. Jalankan start_all.bat --setup";
-   return "Cek jendela robot (start_all.bat) untuk detail";
+   if(code == -1 && err == 4014) return "URL not allowed. Tools > Options > Expert Advisors > Allow WebRequest, add http://127.0.0.1:8765";
+   if(code == -1 && (err == 5203 || err == 4060)) return "Cannot reach the robot (backend). Run start_all.bat first";
+   if(code == 401 || code == 403) return "Wrong token. Set BridgeAuthToken = BRIDGE_AUTH_TOKEN from .env, or run start_all.bat again";
+   if(code == 422) return "Backend rejected the data (422). Update the repo and the EA";
+   if(code == 503) return "Backend not ready or weak server token. Run start_all.bat --setup";
+   return "Check the robot window (start_all.bat) for details";
 }
 
 //+------------------------------------------------------------------+
@@ -579,7 +579,7 @@ int OnInit() {
    for(int i = 0; i < n; i++) {
       if(watch[i] == "") continue;
       string b = ResolveBroker(watch[i]);
-      if(b == "") { Print("MaxTradingBridge: broker tidak punya ", watch[i], ", dilewati"); continue; }
+      if(b == "") { Print("MaxTradingBridge: broker has no ", watch[i], ", skipped"); continue; }
       AddSymbol(watch[i], b);
    }
    string mapping = "";
@@ -618,8 +618,8 @@ void OnTimer() {
    if(code == 200) {
       g_lastPythonHeartbeat = TimeGMT();
       if(!g_connected) {
-         Print("MaxTradingBridge: TERHUBUNG ke robot (", BridgeUrl, ")");
-         Comment("MaxTradingBridge v2.00 | TERHUBUNG ke robot | ", ArraySize(g_logical), " simbol");
+         Print("MaxTradingBridge: CONNECTED to robot (", BridgeUrl, ")");
+         Comment("MaxTradingBridge v2.00 | CONNECTED to robot | ", ArraySize(g_logical), " symbols");
       }
       g_connected = true;
       string respStr = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
@@ -629,7 +629,7 @@ void OnTimer() {
       if(g_connected || code != g_lastSyncCode || TimeGMT() - g_lastErrorPrint >= 10) {
          string hint = SyncErrorHint(code, err);
          Print("MaxTradingBridge: sync GAGAL (http=", code, ", err=", err, "). ", hint);
-         Comment("MaxTradingBridge v2.00 | TIDAK TERHUBUNG (http=", code, ", err=", err, ")\n", hint);
+         Comment("MaxTradingBridge v2.00 | NOT CONNECTED (http=", code, ", err=", err, ")\n", hint);
          g_lastErrorPrint = TimeGMT();
       }
       g_connected = false;

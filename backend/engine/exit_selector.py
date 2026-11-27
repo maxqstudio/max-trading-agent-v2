@@ -88,7 +88,7 @@ class ExitStyleSelector:
             v = self._verdict(g) if g else None
             if v:
                 return Choice(v[0], scope, v[1])
-        return Choice("normal", "default", f"Belum cukup data (minimal {self.min_samples} trade per gaya)")
+        return Choice("normal", "default", f"Not enough data yet (at least {self.min_samples} trades per style)")
 
     def table(self) -> list[dict[str, Any]]:
         rows = []
@@ -96,7 +96,7 @@ class ExitStyleSelector:
             n, h = g.arms["normal"], g.arms["hitrun"]
             v = self._verdict(g)
             rows.append({
-                "key": "Semua" if key == "*" else key.replace("|", " · "),
+                "key": "All" if key == "*" else key.replace("|", " · "),
                 "normal_n": n.n, "normal_avg_r": round(n.mean, 3), "normal_wr": round(n.wins / n.n * 100, 1) if n.n else 0.0,
                 "hitrun_n": h.n, "hitrun_avg_r": round(h.mean, 3), "hitrun_wr": round(h.wins / h.n * 100, 1) if h.n else 0.0,
                 "pick": v[0] if v else None,
