@@ -59,6 +59,16 @@ def ensure_env() -> None:
     setup_all.ensure_control_token()
 
 
+def ensure_mt5_ea() -> None:
+    """Copy + compile the repo's EA into every MT5 terminal (no-op when already current)."""
+    try:
+        import mt5_ea
+
+        mt5_ea.ensure_ea(env_value("BRIDGE_AUTH_TOKEN"))
+    except Exception as exc:  # noqa: BLE001 - never block startup on the EA install
+        print(f"  [WARN] EA MT5 belum terpasang otomatis ({type(exc).__name__}). Jalankan: python scripts/mt5_ea.py")
+
+
 def ensure_dashboard() -> None:
     if (ROOT / "frontend" / "dist" / "index.html").exists():
         print("  [OK] Dashboard sudah ter-build")
@@ -142,7 +152,9 @@ def launch(py: Path, sim: bool) -> int:
         where = "sudah disalin ke clipboard, tinggal Ctrl+V" if copied else "ada di file .env (CONTROL_API_TOKEN)"
         print(f"  Token login : ...{token[-4:]} — {where} saat dashboard meminta")
     if not sim:
-        print("  MT5         : pasang EA 'MaxTradingBridge' di chart XAUUSD M1, izinkan WebRequest ke " + URL)
+        print("  MT5         : EA 'MaxTradingBridge' sudah dipasang otomatis (token sudah terisi).")
+        print("                Di MT5: Tools > Options > Expert Advisors > izinkan WebRequest ke " + URL)
+        print("                lalu drag EA ke chart XAUUSD M1 dan nyalakan Algo Trading.")
     print(f"  Dashboard   : {URL}   (tutup jendela ini atau Ctrl+C untuk berhenti)")
     print("  Ganti mode / ulang setup: jalankan  start_all.bat --setup")
     print("-" * 64 + "\n")
@@ -170,9 +182,12 @@ def main() -> int:
         if probe.returncode != 0:
             print("  Memperbarui dependency Python...")
             subprocess.run([str(py), "-m", "pip", "install", "-q", "-e", ".[dev]"], cwd=ROOT, check=False)
-        return launch(py, env_value("START_MODE") == "sim")
+        sim = env_value("START_MODE") == "sim"
+        if not sim:
+            ensure_mt5_ea()
+        return launch(py, sim)
 
-    total = 5
+    total = 6
     step(1, total, "Cek instalasi")
     py = ensure_install()
     step(2, total, "Cek .env & token keamanan")
@@ -184,6 +199,11 @@ def main() -> int:
     step(5, total, "Pilih mode")
     sim = choose_mode()
     set_env_value("START_MODE", "sim" if sim else "mt5")
+    step(6, total, "Pasang EA MetaTrader 5")
+    if sim:
+        print("  Dilewati (mode SIMULATOR)")
+    else:
+        ensure_mt5_ea()
     return launch(py, sim)
 
 
