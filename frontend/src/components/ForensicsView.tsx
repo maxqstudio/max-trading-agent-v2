@@ -47,7 +47,7 @@ export const ForensicsView: React.FC<{ symbols: string[] }> = ({ symbols }) => {
               <option value="HITRUN">Paper Hit &amp; Run</option>
               <option value="RAW">Paper No Veto (Normal)</option>
               <option value="RAW_HITRUN">Paper No Veto (Hit &amp; Run)</option>
-              <option value="SHADOW">Kandidat (Evolusi)</option>
+              <option value="SHADOW">Challenger (Evolution)</option>
             </select>
             <select value={sym} onChange={(e) => setSym(e.target.value)} className="px-2.5 py-1 rounded cockpit-sub mono">
               <option value="ALL">All Pairs</option>
@@ -83,7 +83,7 @@ export const ForensicsView: React.FC<{ symbols: string[] }> = ({ symbols }) => {
                     <React.Fragment key={t.trade_id}>
                       <tr onClick={() => setExpanded(isOpen ? null : t.trade_id)} className="cursor-pointer hover:bg-[#121B2B]">
                         <td className="py-2 pr-2 mono text-[#8A9BB5]">{t.trade_id}</td>
-                        <td className="py-2 px-2"><span className={`px-1.5 py-0.5 rounded font-bold ${t.is_shadow ? 'bg-[#8B5CF6]/20 text-[#8B5CF6]' : t.version_id === 'PAPER-HITRUN' ? 'bg-[#EC4899]/20 text-[#EC4899]' : t.version_id === 'PAPER-RAW-HITRUN' ? 'bg-[#A855F7]/20 text-[#A855F7]' : t.version_id === 'PAPER-RAW' ? 'bg-[#14B8A6]/20 text-[#14B8A6]' : t.version_id === 'PAPER' ? 'bg-[#F59E0B]/20 text-[#F59E0B]' : 'bg-[#3B82F6]/20 text-[#3B82F6]'}`}>{t.is_shadow ? 'KANDIDAT' : t.version_id === 'PAPER-HITRUN' ? 'HIT&RUN' : t.version_id === 'PAPER-RAW-HITRUN' ? 'TANPA VETO H&R' : t.version_id === 'PAPER-RAW' ? 'TANPA VETO' : t.version_id === 'PAPER' ? 'NORMAL' : 'MT5'}</span></td>
+                        <td className="py-2 px-2"><span className={`px-1.5 py-0.5 rounded font-bold ${t.is_shadow ? 'bg-[#8B5CF6]/20 text-[#8B5CF6]' : t.version_id === 'PAPER-HITRUN' ? 'bg-[#EC4899]/20 text-[#EC4899]' : t.version_id === 'PAPER-RAW-HITRUN' ? 'bg-[#A855F7]/20 text-[#A855F7]' : t.version_id === 'PAPER-RAW' ? 'bg-[#14B8A6]/20 text-[#14B8A6]' : t.version_id === 'PAPER' ? 'bg-[#F59E0B]/20 text-[#F59E0B]' : 'bg-[#3B82F6]/20 text-[#3B82F6]'}`}>{t.is_shadow ? 'CHALLENGER' : t.version_id === 'PAPER-HITRUN' ? 'HIT&RUN' : t.version_id === 'PAPER-RAW-HITRUN' ? 'NO VETO H&R' : t.version_id === 'PAPER-RAW' ? 'NO VETO' : t.version_id === 'PAPER' ? 'NORMAL' : 'MT5'}</span></td>
                         <td className="py-2 px-2 mono font-bold">{t.symbol}</td>
                         <td className="py-2 px-2">{human(t.strategy_id)} <span className="text-[#8A9BB5]">• {human(t.regime)}</span></td>
                         <td className={`py-2 px-2 mono font-bold ${t.side === 'BUY' ? 'text-[#10B981]' : 'text-[#EF4444]'}`}>{t.side}</td>

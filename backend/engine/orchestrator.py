@@ -1770,15 +1770,47 @@ class TradingOrchestrator:
         spread_px = spread_pts * spec.point
         if (spread_px / max(snap.atr14, 1e-9)) > shadow_cfg.risk.max_spread_atr_ratio:
             return
+
+        # Mirror Champion's Cost-to-Risk Gate using real broker commission
+        entry = best.entry_price + (spread_px if best.side == Side.BUY else 0.0)
+        risk_d = max(abs(entry - best.sl_price), snap.atr14 * 0.5, spec.point)
+        comm_px = self._commission_price(sym, spec)
+        max_cost_ratio = self.config.risk.max_cost_to_risk_ratio
+        if max_cost_ratio > 0 and (spread_px + comm_px) / risk_d > max_cost_ratio:
+            return
+
+        # Mirror Champion's RR-aware ML Meta-Labeler gate
         feat = extract_meta_features(
             best, snap, spread_px, dl_pred, bars[-1].timestamp, htf=htf, server_offset_sec=self.server_offset_sec,
             structure=structure_context(bars, ichi_m15, prev_day),
         )
         ml_p = self.ml_labeler.predict_win_probability(feat)
-        if ml_p < shadow_cfg.ai.ml_min_probability:
+        sig_rr = abs(best.tp_price - best.entry_price) / max(abs(best.entry_price - best.sl_price), spec.point)
+        if ml_p < effective_ml_cutoff(shadow_cfg.ai.ml_min_probability, sig_rr):
             return
-        entry = best.entry_price + (spread_px if best.side == Side.BUY else 0.0)
-        risk_d = max(abs(entry - best.sl_price), snap.atr14 * 0.5)
+
+        # Mirror Champion's P0 Entry Filters (HTF trend guard, Ranging breakout guard, session, Ichimoku)
+        side_sign = 1.0 if best.side == Side.BUY else -1.0
+        entry_ctx = {
+            "htf_m15": alignment(side_sign, htf[0]),
+            "htf_h1": alignment(side_sign, htf[1]),
+            "session": session_of(bars[-1].timestamp, self.server_offset_sec),
+            "ichi_m15": int(ichi_m15 * side_sign),
+        }
+        if self._entry_filter(entry_ctx, strategy_id=best.strategy_id, regime=regime.value).code:
+            return
+
+        # Mirror Champion's AI Supervisor veto using the shared 0ms DeskBrief ($0 extra API cost, read-only stats)
+        size_mult = 1.0
+        reviewed = self.supervisor.active and (
+            self.config.app.trading_mode != TradingMode.SHADOW_ONLY or self.config.supervisor.review_in_shadow
+        )
+        if reviewed:
+            verdict = self.supervisor.evaluate_from_brief(sym, best.side, best.strategy_id, record_stats=False)
+            if not verdict.allows_entry:
+                return
+            size_mult = max(0.1, min(1.0, verdict.size_multiplier))
+
         self.shadow_positions[sym] = ShadowPosition(
             symbol=sym,
             strategy_id=best.strategy_id,
@@ -1792,7 +1824,9 @@ class TradingOrchestrator:
             ml_conf=ml_p,
             dl_conf=dl_pred.prob_up if best.side == Side.BUY else dl_pred.prob_down,
             spread_pts=spread_pts,
+            volume=round(size_mult, 2),  # risk scale factor (1.0 = full risk, <1.0 = reduced by AI Supervisor)
             version_id=cand.version_id if cand else f"{self.config.app.version}-shadow",
+            tp_stages=self._stages_inside(best, entry, best.tp_price),
         )
         await self._save_arena()
 
@@ -1800,6 +1834,7 @@ class TradingOrchestrator:
         spos = self.shadow_positions.get(tk.symbol)
         if spos is None:
             return
+        spec = self.specs.get(spos.symbol)
         px = tk.bid if spos.side == Side.BUY else tk.ask
         cur_r = (
             (px - spos.entry_price) / spos.risk_dist
@@ -1809,16 +1844,36 @@ class TradingOrchestrator:
         spos.mae_r = min(spos.mae_r, cur_r)
         spos.mfe_r = max(spos.mfe_r, cur_r)
 
+        spread_px = (tk.ask - tk.bid) if tk.ask > tk.bid else (tk.spread_points * (spec.point if spec else 0.0))
+        comm_px = self._commission_price(spos.symbol, spec)
+        action, new_sl = evaluate(
+            self._exit_policy(), side=spos.side, entry=spos.entry_price, risk=spos.risk_dist,
+            price=px, peak_r=spos.mfe_r, sl=spos.sl, spread_px=spread_px, commission_px=comm_px,
+        )
+        if spos.tp_stages:
+            peak_px = spos.entry_price + spos.mfe_r * spos.risk_dist if spos.side == Side.BUY else spos.entry_price - spos.mfe_r * spos.risk_dist
+            staged = stage_stop(
+                side=spos.side, entry=spos.entry_price, stages=spos.tp_stages, peak_price=peak_px,
+                sl=new_sl if action == "MOVE_SL" else spos.sl, cost_px=spread_px + comm_px,
+            )
+            if staged is not None:
+                action, new_sl = "MOVE_SL", staged
+        if action == "MOVE_SL":
+            spos.sl = round(new_sl, spec.digits if spec else 5)
+
         hit_sl = (spos.side == Side.BUY and px <= spos.sl) or (spos.side == Side.SELL and px >= spos.sl)
         hit_tp = (spos.side == Side.BUY and px >= spos.tp) or (spos.side == Side.SELL and px <= spos.tp)
-        timed_out = (now_sec - spos.open_time) >= 20 * 60
+        timed_out = (now_sec - spos.open_time) >= self.config.paper.max_hold_min * 60
 
         if hit_sl or hit_tp or timed_out:
             self.shadow_positions.pop(tk.symbol, None)
-            net_r = cur_r - 0.04
-            risk_money = self.shadow_equity * (self.config.risk.risk_per_trade_pct / 100.0)
+            comm_r = (comm_px / max(spos.risk_dist, 1e-12)) if comm_px > 0 else 0.04
+            net_r = cur_r - comm_r
+            size_scale = spos.volume if 0.05 <= spos.volume <= 1.0 else 1.0
+            risk_money = self.shadow_equity * (self.config.risk.risk_per_trade_pct / 100.0) * size_scale
             pnl = round(risk_money * net_r, 2)
             self.shadow_equity = round(self.shadow_equity + pnl, 2)
+            in_profit_stop = hit_sl and cur_r > 0
             tr = TradeRecord(
                 is_shadow=True,
                 version_id=spos.version_id,
@@ -1826,7 +1881,7 @@ class TradingOrchestrator:
                 strategy_id=spos.strategy_id,
                 regime=spos.regime,
                 side=spos.side,
-                volume=0.10,
+                volume=round(0.10 * size_scale, 2),
                 entry_price=spos.entry_price,
                 exit_price=px,
                 sl_price=spos.sl,
@@ -1840,7 +1895,7 @@ class TradingOrchestrator:
                 spread_at_entry=spos.spread_pts,
                 ml_confidence=spos.ml_conf,
                 dl_confidence=spos.dl_conf,
-                exit_reason="TP" if hit_tp else ("SL" if hit_sl else "TIME_EXPIRY"),
+                exit_reason="TP" if hit_tp else ("LOCK" if in_profit_stop else ("SL" if hit_sl else "TIME_EXPIRY")),
             )
             await self.db.save_trade(tr)
             await self._save_arena()
@@ -1911,9 +1966,9 @@ class TradingOrchestrator:
                         category="EVOLUTION",
                         tag=f"{name} {'UPDATED' if dec.get('adopted') else 'KEPT'}",
                         message=(
-                            f"{name}: {'model baru dipakai' if dec.get('adopted') else 'champion lama dipertahankan'}"
+                            f"{name}: {'new model adopted' if dec.get('adopted') else 'previous champion kept'}"
                             f"{' (continued from the champion weights)' if dec.get('warm_start') else ''}. {dec.get('reason', '')}. "
-                            f"Data: {max(n_bars.values())} bar M1 per pasar"
+                            f"Data: {max(n_bars.values())} M1 bars per symbol"
                         ),
                     )
                 )

@@ -356,42 +356,47 @@ class TradeSupervisor:
         self.brief_error = ""
         return self.brief
 
-    def evaluate_from_brief(self, symbol: str, side: Side, strategy_id: str) -> SupervisorVerdict:
+    def evaluate_from_brief(
+        self, symbol: str, side: Side, strategy_id: str, *, record_stats: bool = True
+    ) -> SupervisorVerdict:
         """Instantaneous (<0.1ms) pre-trade evaluation using the latest periodic DeskBrief."""
         sym = symbol.upper()
         sb = self.brief.get(sym)
         max_age = max(1800.0, float(self.settings.brief_interval_min) * 180.0)
         stale = self.brief_updated_ts > 0 and (time.time() - self.brief_updated_ts) > max_age
 
+        def _finish(stat_key: str, v: SupervisorVerdict) -> SupervisorVerdict:
+            if record_stats:
+                self.stats[stat_key] += 1
+                return self._remember(v)
+            return v
+
         if sb is None or stale:
             if self.brief_error and self.settings.on_unavailable == "block":
+                if not record_stats:
+                    return SupervisorVerdict("REJECT", 0.0, f"desk brief unavailable: {self.brief_error}", error=self.brief_error)
                 return self._unavailable(f"desk brief unavailable: {self.brief_error}")
-            verdict = SupervisorVerdict(
-                "APPROVE", 1.0, "Desk brief pending — allowed at full size", confidence=0.5, provider=self.brief_provider or "brief"
+            return _finish(
+                "approve",
+                SupervisorVerdict(
+                    "APPROVE", 1.0, "Desk brief pending — allowed at full size", confidence=0.5, provider=self.brief_provider or "brief"
+                ),
             )
-            self.stats["approve"] += 1
-            return self._remember(verdict)
 
         reason = sb.reason or f"Desk brief {sb.bias}"
         if sb.bias == "FLAT":
-            self.stats["reject"] += 1
-            return self._remember(SupervisorVerdict("REJECT", 0.0, f"Desk brief FLAT: {reason}", confidence=0.85, provider=self.brief_provider))
+            return _finish("reject", SupervisorVerdict("REJECT", 0.0, f"Desk brief FLAT: {reason}", confidence=0.85, provider=self.brief_provider))
         if sb.bias == "LONG_ONLY" and side == Side.SELL:
-            self.stats["reject"] += 1
-            return self._remember(SupervisorVerdict("REJECT", 0.0, f"Desk brief LONG_ONLY: {reason}", confidence=0.85, provider=self.brief_provider))
+            return _finish("reject", SupervisorVerdict("REJECT", 0.0, f"Desk brief LONG_ONLY: {reason}", confidence=0.85, provider=self.brief_provider))
         if sb.bias == "SHORT_ONLY" and side == Side.BUY:
-            self.stats["reject"] += 1
-            return self._remember(SupervisorVerdict("REJECT", 0.0, f"Desk brief SHORT_ONLY: {reason}", confidence=0.85, provider=self.brief_provider))
+            return _finish("reject", SupervisorVerdict("REJECT", 0.0, f"Desk brief SHORT_ONLY: {reason}", confidence=0.85, provider=self.brief_provider))
         if strategy_id in sb.avoid_strategies:
-            self.stats["reject"] += 1
-            return self._remember(SupervisorVerdict("REJECT", 0.0, f"Desk brief avoids {strategy_id}: {reason}", confidence=0.8, provider=self.brief_provider))
+            return _finish("reject", SupervisorVerdict("REJECT", 0.0, f"Desk brief avoids {strategy_id}: {reason}", confidence=0.8, provider=self.brief_provider))
         if sb.risk_multiplier < 0.95:
             mult = max(self.settings.min_reduce_multiplier, min(0.9, sb.risk_multiplier))
-            self.stats["reduce"] += 1
-            return self._remember(SupervisorVerdict("REDUCE", mult, f"Desk brief risk {mult:.2f}x: {reason}", confidence=0.75, provider=self.brief_provider))
+            return _finish("reduce", SupervisorVerdict("REDUCE", mult, f"Desk brief risk {mult:.2f}x: {reason}", confidence=0.75, provider=self.brief_provider))
 
-        self.stats["approve"] += 1
-        return self._remember(SupervisorVerdict("APPROVE", 1.0, f"Desk brief {sb.bias}: {reason}", confidence=0.8, provider=self.brief_provider))
+        return _finish("approve", SupervisorVerdict("APPROVE", 1.0, f"Desk brief {sb.bias}: {reason}", confidence=0.8, provider=self.brief_provider))
 
     @property
     def active(self) -> bool:

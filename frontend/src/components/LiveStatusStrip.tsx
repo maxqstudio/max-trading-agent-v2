@@ -106,7 +106,7 @@ export const LiveStatusStrip: React.FC<{ state: LiveStateSnapshot | null; onDemo
             <span className="mono text-[#8A9BB5] shrink-0">{ago(last.ts_ms)}</span>
           </>
         ) : (
-          <span className="mono truncate text-[#8A9BB5]">{state?.active_thought || 'Menunggu setup pertama...'}</span>
+          <span className="mono truncate text-[#8A9BB5]">{state?.active_thought || 'Waiting for first setup...'}</span>
         )}
       </div>
 
