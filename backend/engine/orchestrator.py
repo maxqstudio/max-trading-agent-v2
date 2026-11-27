@@ -33,6 +33,7 @@ from backend.evolution.bandit import ContextualBanditRL
 from backend.evolution.champion_gate import ChampionChallengerGate
 from backend.evolution.llm_reflector import LLMReflectionAnalyst
 from backend.llm.router import LLMRouter
+from backend.engine.supervisor import SupervisorSettings, TradeSupervisor, build_context, price_drifted, scale_volume
 from backend.evolution.meta_labeler import CalibratedMetaLabeler
 from backend.evolution.optimizer import PurgedWalkForwardOptimizer
 from backend.evolution.rl_exit_agent import RLExitAgent
@@ -62,6 +63,20 @@ class ShadowPosition:
     mae_r: float = 0.0
     mfe_r: float = 0.0
     version_id: str = "shadow"
+
+
+def _supervisor_settings(cfg: TradingConfig) -> SupervisorSettings:
+    sc = cfg.supervisor
+    return SupervisorSettings(
+        enabled=sc.enabled,
+        timeout_s=sc.timeout_s,
+        use_fast_model=sc.use_fast_model,
+        effort=sc.effort,
+        on_unavailable="allow" if sc.on_unavailable == "allow" else "block",
+        max_calls_per_hour=sc.max_calls_per_hour,
+        daily_budget_usd=sc.daily_budget_usd,
+        max_price_drift_atr=sc.max_price_drift_atr,
+    )
 
 
 class TradingOrchestrator:
@@ -126,6 +141,10 @@ class TradingOrchestrator:
         )
         self.optimizer = PurgedWalkForwardOptimizer()
         self.reflector = LLMReflectionAnalyst(env, router=self.llm)
+        self.supervisor = TradeSupervisor(self.llm, _supervisor_settings(config))
+        self._supervising: set[str] = set()
+        self._supervisor_tasks: set[asyncio.Task] = set()
+        self._recent_closed: deque[TradeRecord] = deque(maxlen=60)
         self.gate = ChampionChallengerGate(config, initial_equity=self.account.equity)
 
         # Parallel Live Shadow Arena
@@ -180,6 +199,7 @@ class TradingOrchestrator:
 
     def apply_active_config(self, cfg: TradingConfig) -> None:
         self.config = cfg
+        self.supervisor.settings = _supervisor_settings(cfg)
         self.risk.config = cfg.risk
         self.shields.config = cfg.shields
         self.suite = StrategySuite.from_config(cfg)
@@ -238,6 +258,7 @@ class TradingOrchestrator:
         # 3. Online learning on every newly closed live trade (RL-1 Bandit + RL-2 Exit + Rollback Guard)
         for tr in closed_trades:
             await self.db.save_trade(tr)
+            self._recent_closed.append(tr)
             self.bandit.update(tr.symbol, tr.regime, tr.strategy_id, tr.pnl_r)
             self.risk.record_trade_outcome(tr.pnl_money, now_sec)
             self.rl_exit.update_from_closed_trade(
@@ -448,6 +469,99 @@ class TradingOrchestrator:
             )
             return
 
+        if self.supervisor.active and (
+            self.config.app.trading_mode != TradingMode.SHADOW_ONLY or self.config.supervisor.review_in_shadow
+        ):
+            if sym in self._supervising:
+                return
+            self._supervising.add(sym)
+            ctx = build_context(
+                signal=best_sig,
+                spec=spec,
+                volume=risk_dec.volume,
+                sl=risk_dec.adjusted_sl,
+                tp=risk_dec.adjusted_tp,
+                spread_points=spread_pts,
+                bars=bar_list,
+                ind=assess.indicators,
+                dl_up=dl_pred.prob_up,
+                dl_down=dl_pred.prob_down,
+                ml_prob=ml_prob,
+                bandit_weight=b_weight,
+                open_positions=self.open_positions,
+                recent_trades=list(self._recent_closed),
+                daily_dd_pct=self.account.daily_dd_pct,
+                max_daily_dd_pct=self.config.risk.max_daily_drawdown_pct,
+                consecutive_losses=self.risk.consecutive_losses,
+                hour_utc=int((now_sec % 86400) // 3600),
+            )
+            self.active_thought = f"{sym} {best_sig.side.value} via {best_sig.strategy_id} — waiting for supervisor"
+            task = asyncio.create_task(
+                self._supervise_then_finalize(ctx, sym, best_sig, risk_dec, assess, spec, ml_prob, dl_align, b_weight, spread_pts, lat_ms)
+            )
+            self._supervisor_tasks.add(task)
+            task.add_done_callback(self._supervisor_tasks.discard)
+            return
+
+        await self._finalize_entry(sym, best_sig, risk_dec, assess, spec, ml_prob, dl_align, b_weight, spread_pts, lat_ms)
+
+    async def _supervise_then_finalize(
+        self, ctx: str, sym: str, best_sig: Any, risk_dec: Any, assess: Any, spec: SymbolSpec,
+        ml_prob: float, dl_align: float, b_weight: float, spread_pts: float, lat_ms: float,
+    ) -> None:
+        try:
+            verdict = await self.supervisor.review(ctx)
+            note = f" | Supervisor {verdict.decision} ({verdict.provider or 'policy'}, {verdict.latency_ms:.0f}ms): {verdict.reason}"
+            if not verdict.allows_entry:
+                await self._log_decision(
+                    DecisionEvent(
+                        symbol=sym,
+                        category="BLOCK",
+                        tag="SUPERVISOR VETO" if not verdict.error else "SUPERVISOR DOWN",
+                        strategy_id=best_sig.strategy_id,
+                        side=best_sig.side.value,
+                        message=f"{best_sig.side.value} {risk_dec.volume} lot skipped{note}",
+                        latency_ms=verdict.latency_ms,
+                    )
+                )
+                self.active_thought = f"{sym} vetoed by supervisor: {verdict.reason}"
+                return
+            if verdict.size_multiplier < 1.0:
+                new_vol = scale_volume(risk_dec.volume, verdict.size_multiplier, spec)
+                if new_vol <= 0:
+                    await self._log_decision(
+                        DecisionEvent(symbol=sym, category="BLOCK", tag="SUPERVISOR REDUCE", strategy_id=best_sig.strategy_id,
+                                      side=best_sig.side.value, message=f"Reduced size below broker minimum — skipped{note}")
+                    )
+                    return
+                risk_dec.volume = new_vol
+            # The world moved while we waited: re-check the hard gates and the price.
+            if self.risk.killed or self.risk.paused:
+                return
+            if any(p.symbol == sym for p in self.open_positions):
+                return
+            tick = self.ticks.get(sym)
+            if tick is not None:
+                px = tick.ask if best_sig.side == Side.BUY else tick.bid
+                if price_drifted(best_sig.side, best_sig.entry_price, px, best_sig.atr, self.config.supervisor.max_price_drift_atr):
+                    await self._log_decision(
+                        DecisionEvent(symbol=sym, category="BLOCK", tag="STALE AFTER REVIEW", strategy_id=best_sig.strategy_id,
+                                      side=best_sig.side.value, message=f"Price moved >{self.config.supervisor.max_price_drift_atr} ATR against entry while reviewing{note}")
+                    )
+                    return
+            await self._finalize_entry(sym, best_sig, risk_dec, assess, spec, ml_prob, dl_align, b_weight, spread_pts, lat_ms, note)
+        except Exception as exc:  # never let a background review crash the engine
+            await self._log_decision(
+                DecisionEvent(symbol=sym, category="BLOCK", tag="SUPERVISOR ERROR", message=str(exc)[:200])
+            )
+        finally:
+            self._supervising.discard(sym)
+
+    async def _finalize_entry(
+        self, sym: str, best_sig: Any, risk_dec: Any, assess: Any, spec: SymbolSpec,
+        ml_prob: float, dl_align: float, b_weight: float, spread_pts: float, lat_ms: float, note: str = "",
+    ) -> None:
+        tick = self.ticks.get(sym)
         # In SHADOW_ONLY mode, log & skip real MT5 dispatch
         if self.config.app.trading_mode == TradingMode.SHADOW_ONLY:
             await self._log_decision(
@@ -457,7 +571,7 @@ class TradingOrchestrator:
                     tag="SHADOW ONLY",
                     strategy_id=best_sig.strategy_id,
                     side=best_sig.side.value,
-                    message=f"Validated setup ({risk_dec.volume} lot, ML {ml_prob:.0%}, DL {dl_align:.0%}) — live dispatch muted in SHADOW_ONLY",
+                    message=f"Validated setup ({risk_dec.volume} lot, ML {ml_prob:.0%}, DL {dl_align:.0%}) — live dispatch muted in SHADOW_ONLY{note}",
                     latency_ms=lat_ms,
                 )
             )
@@ -500,7 +614,7 @@ class TradingOrchestrator:
                     tag="ORDER SENT",
                     strategy_id=best_sig.strategy_id,
                     side=best_sig.side.value,
-                    message=f"{best_sig.side.value} {risk_dec.volume} lot | ML {ml_prob:.0%} • DL {dl_align:.0%} • {best_sig.reason}",
+                    message=f"{best_sig.side.value} {risk_dec.volume} lot | ML {ml_prob:.0%} • DL {dl_align:.0%} • {best_sig.reason}{note}",
                     latency_ms=lat_ms,
                 )
             )
@@ -926,6 +1040,7 @@ class TradingOrchestrator:
             "killed": self.risk.killed,
             "kill_reason": self.kill_state.reason if self.risk.killed else "",
             "live_trading_enabled": self.env.allow_live_trading,
+            "supervisor": self.supervisor.status(),
             "entry_block_reason": self.entry_block_reason(),
             "evolution_running": self.evolution_running,
             "bridge_connected": stale_sec < 6.0,

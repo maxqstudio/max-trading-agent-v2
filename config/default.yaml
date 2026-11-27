@@ -105,3 +105,15 @@ evolution:
   rollback_live_dd_pct: 1.50
   rollback_min_trades: 8
   wfo_trials: 12
+
+# Claude veto layer (needs an LLM provider in .env; without one it is simply off)
+supervisor:
+  enabled: true
+  timeout_s: 6.0            # M1 scalping: answer must come back fast
+  use_fast_model: true      # ANTHROPIC_FAST_MODEL (default claude-haiku-5-5)
+  effort: "low"
+  on_unavailable: "block"   # block = skip trade if LLM slow/down/over budget | allow = trade without veto
+  max_calls_per_hour: 120
+  daily_budget_usd: 5.0
+  max_price_drift_atr: 0.25 # skip if price moved this far against the entry while waiting
+  review_in_shadow: true    # review paper trades too, to judge the supervisor before live

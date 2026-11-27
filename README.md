@@ -43,6 +43,17 @@ Double-click **`llm_setup.bat`** (or `python scripts/llm_setup.py`): pick provid
 
 LLM suggestions can never raise risk: patches are whitelisted, clamped, capped at a 20% step, risk-increasing directions are discarded, and every change still has to pass walk-forward + Monte Carlo + shadow trading before a human approves it.
 
+## Claude Trade Supervisor (veto layer)
+
+Every trade the quant engine wants to take (strategy → bandit → ML filter → risk-sized) is sent to the supervisor before it reaches MT5. It answers **APPROVE**, **REDUCE** (0.25–0.9× size) or **REJECT** with a one-line reason that shows up in the dashboard decision log. It can never enlarge a trade, move SL/TP or open anything by itself.
+
+Tuned for M1 scalping (`supervisor:` in `config/default.yaml`):
+- one call with a compact (~400 token) context, `ANTHROPIC_FAST_MODEL` (default `claude-haiku-5-5`) at `effort: low`, 6 s timeout; it runs off the bridge loop so the EA never waits
+- `on_unavailable: block` (default) skips the trade if the model is slow, down, invalid or over budget; `allow` trades without a veto instead
+- after the answer, kill switch / pause / open position / price drift (`max_price_drift_atr`) are re-checked
+- `max_calls_per_hour` and `daily_budget_usd` cap spend; `GET /api/llm/status` shows approve/reduce/reject counts and spend
+- `review_in_shadow: true` lets you judge the supervisor on paper trades before going live
+
 ## Safety Rails (read before trading real money)
 
 - **Paper trading by default.** `trading_mode: SHADOW_ONLY` logs and shadow-tracks every validated setup but sends nothing to MT5.

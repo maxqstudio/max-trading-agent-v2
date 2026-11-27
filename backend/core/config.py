@@ -91,6 +91,20 @@ class EvolutionConfig(BaseModel):
     wfo_trials: int = 12
 
 
+class SupervisorConfig(BaseModel):
+    """LLM (Claude first) veto layer between the risk manager and MT5. See backend/engine/supervisor.py."""
+
+    enabled: bool = True
+    timeout_s: float = 6.0
+    use_fast_model: bool = True
+    effort: str = "low"
+    on_unavailable: str = "block"  # block = skip the trade if the LLM is slow/down; allow = trade without veto
+    max_calls_per_hour: int = 120
+    daily_budget_usd: float = 5.0
+    max_price_drift_atr: float = 0.25
+    review_in_shadow: bool = True  # also review paper trades so you can judge the supervisor before going live
+
+
 class TradingConfig(BaseModel):
     app: AppConfig = Field(default_factory=AppConfig)
     instruments: InstrumentsConfig = Field(default_factory=InstrumentsConfig)
@@ -99,6 +113,7 @@ class TradingConfig(BaseModel):
     ai: AIConfig = Field(default_factory=AIConfig)
     strategies: dict[str, dict[str, Any]] = Field(default_factory=dict)
     evolution: EvolutionConfig = Field(default_factory=EvolutionConfig)
+    supervisor: SupervisorConfig = Field(default_factory=SupervisorConfig)
 
 
 class EnvSettings(BaseSettings):

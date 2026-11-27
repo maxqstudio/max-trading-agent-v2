@@ -307,7 +307,11 @@ def create_app(orchestrator: TradingOrchestrator) -> FastAPI:
     # --- LLM providers (Claude first). Keys are shown masked; they are only ever set in .env ---
     @api.get("/llm/status")
     async def llm_status() -> dict[str, Any]:
-        return {**orchestrator.llm.status(), "last_reflection_error": orchestrator.reflector.last_error}
+        return {
+            **orchestrator.llm.status(),
+            "last_reflection_error": orchestrator.reflector.last_error,
+            "supervisor": orchestrator.supervisor.status(),
+        }
 
     @api.post("/llm/test")
     async def llm_test() -> dict[str, Any]:
