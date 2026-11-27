@@ -175,3 +175,35 @@ def test_paper_compare_and_exit_settings(client):
     assert r["exits"]["adaptive"] is False and r["exits"]["be_at_r"] == 0.4 and r["hit_run"]["min_net_profit"] == 2.5
     assert c.get("/api/paper/compare").json()["learning"]["adaptive"] is False
     assert c.put("/api/setup/exits", json={"be_at_r": 9}).status_code == 422
+
+
+def test_broker_costs_learned_from_mt5_and_manual_override(client):
+    from backend.core.models import MarketRegime, Side, TradeRecord
+
+    c, _, orch = client
+    c.portal.call(orch.db.connect)
+    sym = orch.config.instruments.symbols[0]
+    view = c.get("/api/setup").json()["costs"]
+    row = next(r for r in view["symbols"] if r["symbol"] == sym)
+    assert row["commission_source"] == "default" and row["mt5_trades"] == 0
+
+    async def add_trades():
+        for i, comm in enumerate((-0.35, -0.35, -0.40)):
+            await orch.db.save_trade(TradeRecord(
+                symbol=sym, strategy_id="s", regime=MarketRegime.RANGING, side=Side.BUY, volume=0.10,
+                entry_price=1, exit_price=1, sl_price=1, tp_price=1, open_time=i, close_time=i + 1,
+                pnl_money=1.0, pnl_r=0.1, commission=comm, slippage_points=2.0, version_id="v1",
+            ))
+        await orch._learn_broker_costs()
+
+    c.portal.call(add_trades)
+    row = next(r for r in c.get("/api/setup").json()["costs"]["symbols"] if r["symbol"] == sym)
+    # 0.35 entry commission on 0.10 lot -> 7.00 per lot round trip
+    assert row["commission_source"] == "mt5" and row["commission_per_lot"] == 7.0
+    assert row["slippage_points"] == 2.0 and row["mt5_trades"] == 3
+
+    r = c.put("/api/setup/costs", json={"commission_per_lot": 3.5, "slippage_points": None}).json()
+    row = next(x for x in r["symbols"] if x["symbol"] == sym)
+    assert row["commission_source"] == "manual" and row["commission_per_lot"] == 3.5
+    assert row["slippage_source"] == "mt5"
+    assert orch._net_take(sym).commission_per_lot == 3.5

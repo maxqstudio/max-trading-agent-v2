@@ -1,6 +1,7 @@
 import React from 'react';
 import { Bot, Cable, Gavel, Lock, Zap } from 'lucide-react';
 import type { LiveStateSnapshot } from '../types/trading';
+import { human, humanText } from '../labels';
 
 // Real-time status from the backend snapshot (replaces the old animated "engine loop").
 
@@ -59,7 +60,7 @@ export const LiveStatusStrip: React.FC<{ state: LiveStateSnapshot | null; onDemo
       </Chip>
 
       <Chip icon={Lock} label="ENTRY" tone={gateTone} title="Apakah order baru boleh dikirim ke MT5 sekarang">
-        {block ? BLOCK_LABELS[block] || block : `TERBUKA · ${state?.trading_mode ?? ''}`}
+        {block ? BLOCK_LABELS[block] || human(block) : `TERBUKA · ${human(state?.trading_mode ?? '')}`}
       </Chip>
 
       <Chip
@@ -87,11 +88,11 @@ export const LiveStatusStrip: React.FC<{ state: LiveStateSnapshot | null; onDemo
                 background: 'rgba(255,255,255,0.05)',
               }}
             >
-              {last.decision}
+              {human(last.decision)}
             </span>
             <span className="mono font-bold shrink-0">{last.symbol}</span>
             <span className="truncate text-[#E6EDF7]" title={last.reason}>
-              {last.reason}
+              {humanText(last.reason)}
             </span>
             <span className="mono text-[#8A9BB5] shrink-0">{ago(last.ts_ms)}</span>
           </>

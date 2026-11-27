@@ -12,7 +12,6 @@ import {
   Settings,
   Shield,
   ShieldAlert,
-  TrendingUp,
 } from 'lucide-react';
 import { api, useLiveTelemetry } from './api/client';
 import { BrainView } from './components/BrainView';
@@ -25,6 +24,8 @@ import { PaperCompare } from './components/PaperCompare';
 import { RiskConfigView } from './components/RiskConfigView';
 import { SetupView } from './components/SetupView';
 import type { DecisionEvent } from './types/trading';
+import { BullishLogo } from './components/BullishLogo';
+import { human, humanText } from './labels';
 
 type TabId = 'cockpit' | 'brain' | 'evolution' | 'journal' | 'risk' | 'setup';
 
@@ -91,9 +92,7 @@ export default function App() {
       <header className="sticky top-0 z-30 bg-[#0A101B] border-b border-[#1F2D45] px-3.5 py-2 flex flex-wrap items-center justify-between gap-2.5">
         <div className="flex items-center gap-2.5 flex-wrap">
           <div className="flex items-center gap-2 pr-2.5 border-r border-[#1F2D45]">
-            <div className="w-8 h-8 rounded-lg flex items-center justify-center bg-[#3B82F6]/15 border border-[#3B82F6]/45 text-[#3B82F6]">
-              <TrendingUp className="w-4 h-4" />
-            </div>
+            <BullishLogo size={32} />
             <div>
               <div className="flex items-center gap-1.5 leading-none">
                 <span className="font-bold tracking-wider text-xs">MAX QUANT</span>
@@ -101,7 +100,7 @@ export default function App() {
                   {state?.champion_version || 'v1.0'}
                 </span>
               </div>
-              <div className="text-xs text-[#8A9BB5] mt-0.5">MT5 Autonomous Desk</div>
+              <div className="text-xs text-[#8A9BB5] mt-0.5">Robot trading MT5</div>
             </div>
           </div>
 
@@ -116,17 +115,17 @@ export default function App() {
               }
               try {
                 await api.setMode(next, code);
-                showToast(`Mode switched to ${next}`);
+                showToast(`Mode diganti ke ${human(next)}`);
               } catch (err) {
                 showToast(`Mode change refused: ${(err as Error).message}`);
               }
             }}
             className="mono text-xs font-bold px-2.5 py-1.5 rounded-md cockpit-card cursor-pointer focus:outline-none"
           >
-            <option value="SHADOW_ONLY">SHADOW ONLY (paper)</option>
-            <option value="SIMULATOR">SIMULATOR</option>
-            <option value="MT5_DEMO">MT5 DEMO</option>
-            <option value="MT5_LIVE">MT5 LIVE</option>
+            <option value="SHADOW_ONLY">{human('SHADOW_ONLY')}</option>
+            <option value="SIMULATOR">{human('SIMULATOR')}</option>
+            <option value="MT5_DEMO">{human('MT5_DEMO')}</option>
+            <option value="MT5_LIVE">{human('MT5_LIVE')}</option>
           </select>
 
           <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-md cockpit-card text-xs">
@@ -322,7 +321,7 @@ export default function App() {
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-1.5">
                             <span className="mono font-bold text-sm">{r.symbol}</span>
-                            <span className="px-1.5 py-0.5 rounded bg-[#10B981]/15 text-[#10B981] font-bold">{r.regime}</span>
+                            <span className="px-1.5 py-0.5 rounded bg-[#10B981]/15 text-[#10B981] font-bold">{human(r.regime)}</span>
                           </div>
                           <span className="mono font-bold">{r.bid.toFixed(r.digits)}</span>
                         </div>
@@ -371,7 +370,7 @@ export default function App() {
                       <tbody className="divide-y divide-[#1F2D45]">
                         {paperPositions.map((p) => (
                           <tr key={`paper-${p.book ?? 'normal'}-${p.symbol}`}>
-                            <td className="py-2 px-2"><div className="mono font-bold">{p.symbol} <span className={`px-1 rounded text-[10px] ${p.book === 'hitrun' ? 'bg-[#EC4899]/15 text-[#EC4899]' : p.book === 'raw' ? 'bg-[#14B8A6]/15 text-[#14B8A6]' : 'bg-[#F59E0B]/15 text-[#F59E0B]'}`}>{p.book === 'hitrun' ? 'HIT&RUN' : p.book === 'raw' ? 'TANPA VETO' : 'NORMAL'}</span></div><div className="text-[#8A9BB5]">{p.strategy_id}</div></td>
+                            <td className="py-2 px-2"><div className="mono font-bold">{p.symbol} <span className={`px-1 rounded text-[10px] ${p.book === 'hitrun' ? 'bg-[#EC4899]/15 text-[#EC4899]' : p.book === 'raw' ? 'bg-[#14B8A6]/15 text-[#14B8A6]' : 'bg-[#F59E0B]/15 text-[#F59E0B]'}`}>{p.book === 'hitrun' ? 'HIT&RUN' : p.book === 'raw' ? 'TANPA VETO' : 'NORMAL'}</span></div><div className="text-[#8A9BB5]">{human(p.strategy_id)}</div></td>
                             <td className="py-2 px-2 mono"><span className={`px-1.5 py-0.5 rounded font-bold ${p.side === 'BUY' ? 'bg-[#10B981]/15 text-[#10B981]' : 'bg-[#EF4444]/15 text-[#EF4444]'}`}>{p.side}</span> {p.volume}</td>
                             <td className="py-2 px-2 mono">{p.entry_price} → <b>{p.current_price}</b></td>
                             <td className={`py-2 px-2 mono font-bold ${p.profit >= 0 ? 'text-[#10B981]' : 'text-[#EF4444]'}`}>{p.profit >= 0 ? '+' : ''}${p.profit.toFixed(2)}</td>
@@ -384,11 +383,11 @@ export default function App() {
                         ) : (
                           (state?.positions || []).map((p) => (
                             <tr key={p.ticket}>
-                              <td className="py-2 px-2"><div className="mono font-bold">{p.symbol}</div><div className="text-[#8A9BB5]">{p.strategy_id}</div></td>
+                              <td className="py-2 px-2"><div className="mono font-bold">{p.symbol}</div><div className="text-[#8A9BB5]">{human(p.strategy_id)}</div></td>
                               <td className="py-2 px-2 mono"><span className={`px-1.5 py-0.5 rounded font-bold ${p.side === 'BUY' ? 'bg-[#10B981]/15 text-[#10B981]' : 'bg-[#EF4444]/15 text-[#EF4444]'}`}>{p.side}</span> {p.volume}</td>
                               <td className="py-2 px-2 mono">{p.open_price} → <b>{p.current_price}</b></td>
                               <td className={`py-2 px-2 mono font-bold ${p.profit >= 0 ? 'text-[#10B981]' : 'text-[#EF4444]'}`}>{p.profit >= 0 ? '+' : ''}${p.profit.toFixed(2)}</td>
-                              <td className="py-2 px-2"><span className="px-1.5 py-0.5 rounded bg-[#06B6D4]/15 text-[#06B6D4] mono font-bold">{p.rl_exit_action}</span></td>
+                              <td className="py-2 px-2"><span className="px-1.5 py-0.5 rounded bg-[#06B6D4]/15 text-[#06B6D4] mono font-bold">{human(p.rl_exit_action)}</span></td>
                               <td className="py-2 px-2 text-right">
                                 <button
                                   onClick={async () => {
@@ -444,11 +443,11 @@ export default function App() {
                               <b>{d.symbol}</b>
                             </span>
                             <span className={`px-1.5 py-0.5 rounded font-bold ${tone === 'win' ? 'bg-[#10B981]/20 text-[#10B981]' : tone === 'loss' ? 'bg-[#EF4444]/20 text-[#EF4444]' : d.category === 'EXEC' ? 'bg-[#06B6D4]/15 text-[#06B6D4]' : d.category === 'BLOCK' ? 'bg-[#F59E0B]/15 text-[#F59E0B]' : 'bg-[#06B6D4]/15 text-[#06B6D4]'}`}>
-                              {d.tag}
+                              {humanText(d.tag)}
                               {pnl != null ? ` ${pnl > 0 ? '+' : pnl < 0 ? '-' : ''}$${Math.abs(pnl).toFixed(2)}` : ''}
                             </span>
                           </div>
-                          <div className={`leading-snug ${tone === 'win' ? 'text-[#6EE7B7]' : tone === 'loss' ? 'text-[#FCA5A5]' : 'text-[#8A9BB5]'}`}>{d.message}</div>
+                          <div className={`leading-snug ${tone === 'win' ? 'text-[#6EE7B7]' : tone === 'loss' ? 'text-[#FCA5A5]' : 'text-[#8A9BB5]'}`}>{humanText(d.message)}</div>
                         </div>
                         );
                       })

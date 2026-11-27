@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../api/client';
 import type { TradeRecord } from '../types/trading';
+import { human, humanText } from '../labels';
 
 export const ForensicsView: React.FC<{ symbols: string[] }> = ({ symbols }) => {
   const [mode, setMode] = useState('ALL');
@@ -83,7 +84,7 @@ export const ForensicsView: React.FC<{ symbols: string[] }> = ({ symbols }) => {
                         <td className="py-2 pr-2 mono text-[#8A9BB5]">{t.trade_id}</td>
                         <td className="py-2 px-2"><span className={`px-1.5 py-0.5 rounded font-bold ${t.is_shadow ? 'bg-[#8B5CF6]/20 text-[#8B5CF6]' : t.version_id === 'PAPER-HITRUN' ? 'bg-[#EC4899]/20 text-[#EC4899]' : t.version_id === 'PAPER-RAW' ? 'bg-[#14B8A6]/20 text-[#14B8A6]' : t.version_id === 'PAPER' ? 'bg-[#F59E0B]/20 text-[#F59E0B]' : 'bg-[#3B82F6]/20 text-[#3B82F6]'}`}>{t.is_shadow ? 'KANDIDAT' : t.version_id === 'PAPER-HITRUN' ? 'HIT&RUN' : t.version_id === 'PAPER-RAW' ? 'TANPA VETO' : t.version_id === 'PAPER' ? 'NORMAL' : 'MT5'}</span></td>
                         <td className="py-2 px-2 mono font-bold">{t.symbol}</td>
-                        <td className="py-2 px-2">{t.strategy_id} <span className="text-[#8A9BB5]">• {t.regime}</span></td>
+                        <td className="py-2 px-2">{human(t.strategy_id)} <span className="text-[#8A9BB5]">• {human(t.regime)}</span></td>
                         <td className={`py-2 px-2 mono font-bold ${t.side === 'BUY' ? 'text-[#10B981]' : 'text-[#EF4444]'}`}>{t.side}</td>
                         <td className="py-2 px-2 mono"><span className="text-[#EF4444]">{t.mae_r.toFixed(2)}R</span> / <span className="text-[#10B981]">+{t.mfe_r.toFixed(2)}R</span></td>
                         <td className="py-2 px-2 mono">{Math.round(t.ml_confidence * 100)}% / {Math.round(t.dl_confidence * 100)}%</td>
@@ -106,11 +107,11 @@ export const ForensicsView: React.FC<{ symbols: string[] }> = ({ symbols }) => {
                               </div>
                               <div>
                                 <div className="font-bold mb-1">Execution Costs & Exit</div>
-                                <div className="mono text-[#8A9BB5]">Slip: {t.slippage_points}pt • Comm: ${t.commission.toFixed(2)} • Exit: {t.exit_reason}</div>
+                                <div className="mono text-[#8A9BB5]">Slip: {t.slippage_points}pt • Comm: ${t.commission.toFixed(2)} • Exit: {human(t.exit_reason)}</div>
                               </div>
                               <div>
                                 <div className="font-bold mb-1">RL-2 Exit Trace</div>
-                                <div className="mono text-[#06B6D4]">{t.rl_exit_trace}</div>
+                                <div className="mono text-[#06B6D4]">{humanText(t.rl_exit_trace)}</div>
                               </div>
                             </div>
                           </td>
