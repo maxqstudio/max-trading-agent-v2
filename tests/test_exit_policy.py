@@ -122,4 +122,4 @@ def test_selector_needs_evidence_before_switching():
     assert sel.choose("XAUUSD", "TRENDING_UP").style == "normal"
     # Unseen regime falls back to the symbol's own evidence.
     assert sel.choose("EURUSD", "VOLATILE").scope == "symbol"
-    assert any(r["key"] == "Semua" for r in sel.table())
+    assert any(r["key"] == "All" for r in sel.table())
