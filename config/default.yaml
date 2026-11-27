@@ -1,7 +1,10 @@
 app:
   name: "Max Trading Agent v2"
   version: "v1.0"
-  trading_mode: "MT5_DEMO" # SIMULATOR | SHADOW_ONLY | MT5_DEMO | MT5_LIVE
+  # SHADOW_ONLY = paper trading (default, nothing is sent to MT5)
+  # MT5_DEMO = orders on a DEMO account only | MT5_LIVE = real money, also needs ALLOW_LIVE_TRADING=true in .env
+  trading_mode: "SHADOW_ONLY" # SIMULATOR | SHADOW_ONLY | MT5_DEMO | MT5_LIVE
+  kill_switch_path: "data/kill_switch.json"
   auto_promote_challenger: false
   database_path: "data/max_agent.db"
   snapshots_dir: "data/snapshots"

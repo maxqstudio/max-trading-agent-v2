@@ -5,6 +5,7 @@ from typing import Any
 
 from backend.core.config import TradingConfig, get_nested_value, set_nested_value
 from backend.core.models import ParameterPatch
+from backend.core.safety import is_strong_token
 
 # Absolute non-negotiable safety bounds that neither Optimizer nor LLM can ever bypass.
 HARD_SAFETY_BOUNDS: dict[str, tuple[float, float]] = {
@@ -44,10 +45,15 @@ INTEGER_PATHS: set[str] = {
 }
 
 
-def verify_bridge_token(provided: str | None, expected: str) -> bool:
-    if not provided or not expected:
+def verify_shared_token(provided: str | None, expected: str) -> bool:
+    """Constant-time token check that also refuses weak / placeholder expected tokens."""
+    if not provided or not is_strong_token(expected):
         return False
-    return hmac.compare_digest(provided.strip(), expected.strip())
+    return hmac.compare_digest(provided.strip().encode(), expected.strip().encode())
+
+
+def verify_bridge_token(provided: str | None, expected: str) -> bool:
+    return verify_shared_token(provided, expected)
 
 
 def clamp_and_validate_patch(

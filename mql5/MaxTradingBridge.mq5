@@ -12,7 +12,7 @@
 
 //--- Bridge Connection Inputs
 input string   BridgeUrl              = "http://127.0.0.1:8765/api/bridge/sync";
-input string   BridgeAuthToken        = "mta2_dev_change_me_to_random_secret_32chars";
+input string   BridgeAuthToken        = "";      // Filled in by setup_and_test.bat (never commit a real token)
 input int      SyncIntervalMs         = 350;      // Fast poll interval (ms)
 input int      WebTimeoutMs           = 1200;     // HTTP timeout (ms)
 input string   LogicalSymbols         = "XAUUSD,EURUSD,GBPUSD,USDJPY";
@@ -476,6 +476,10 @@ void ProcessResponse(const string resp) {
 //| Expert Lifecycle                                                 |
 //+------------------------------------------------------------------+
 int OnInit() {
+   if(StringLen(BridgeAuthToken) < 24 || StringFind(BridgeAuthToken, "change_me") >= 0) {
+      Print("MaxTradingBridge: BridgeAuthToken is empty or a placeholder. Copy BRIDGE_AUTH_TOKEN from .env into the EA inputs.");
+      return(INIT_PARAMETERS_INCORRECT);
+   }
    int n = StringSplit(LogicalSymbols, ',', g_logical);
    ArrayResize(g_broker, n);
    ArrayResize(g_lastBarTime, n);

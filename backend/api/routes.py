@@ -3,13 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from backend.core.models import BridgeSyncRequest, BridgeSyncResponse, ParameterPatch, TradingMode
-from backend.core.security import apply_safe_patches, verify_bridge_token
+from backend.core.safety import is_strong_token
+from backend.core.security import apply_safe_patches, verify_bridge_token, verify_shared_token
 from backend.engine.orchestrator import TradingOrchestrator
 
 
@@ -29,6 +30,11 @@ class RiskUpdateRequest(BaseModel):
 
 class ModeUpdateRequest(BaseModel):
     trading_mode: TradingMode
+    confirm_code: str = ""  # must be "LIVE" to switch into MT5_LIVE
+
+
+class KillReleaseRequest(BaseModel):
+    confirm_code: str = ""  # must be "RELEASE"
 
 
 class RollbackRequest(BaseModel):
@@ -40,23 +46,46 @@ class KillRequest(BaseModel):
     mode: str = "SOFT_PAUSE"  # SOFT_PAUSE | FLATTEN_KILL
 
 
+def _allowed_origins(port: int) -> list[str]:
+    # Only the dashboard served by this process (and the Vite dev server) may call the API
+    # from a browser. Any other website you visit is refused by CORS preflight.
+    return [
+        f"http://127.0.0.1:{port}",
+        f"http://localhost:{port}",
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+    ]
+
+
 def create_app(orchestrator: TradingOrchestrator) -> FastAPI:
     app = FastAPI(title="Max Trading Agent v2 API", version="2.0.0")
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_origins=_allowed_origins(orchestrator.env.api_port),
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "PUT"],
+        allow_headers=["Content-Type", "X-Control-Token"],
     )
-
-    api = APIRouter(prefix="/api")
 
     def require_bridge_token(x_bridge_token: str | None = Header(default=None)) -> None:
         if not verify_bridge_token(x_bridge_token, orchestrator.env.bridge_auth_token):
             raise HTTPException(status_code=401, detail="Invalid or missing X-Bridge-Token")
 
-    @api.get("/health")
+    def require_control_token(x_control_token: str | None = Header(default=None)) -> None:
+        if not is_strong_token(orchestrator.env.control_api_token):
+            raise HTTPException(
+                status_code=503,
+                detail="CONTROL_API_TOKEN is not set (or too weak) in .env — run setup_and_test.bat",
+            )
+        if not verify_shared_token(x_control_token, orchestrator.env.control_api_token):
+            raise HTTPException(status_code=401, detail="Invalid or missing X-Control-Token")
+
+    # Public: health only. Bridge: its own token. Everything else: control token.
+    public = APIRouter(prefix="/api")
+    bridge = APIRouter(prefix="/api")
+    api = APIRouter(prefix="/api", dependencies=[Depends(require_control_token)])
+
+    @public.get("/health")
     async def health() -> dict[str, Any]:
         return {
             "status": "ok",
@@ -65,7 +94,7 @@ def create_app(orchestrator: TradingOrchestrator) -> FastAPI:
         }
 
     # --- Authenticated MT5 Zero-DLL Bridge ---
-    @api.post("/bridge/sync", response_model=BridgeSyncResponse, dependencies=[Depends(require_bridge_token)])
+    @bridge.post("/bridge/sync", response_model=BridgeSyncResponse, dependencies=[Depends(require_bridge_token)])
     async def bridge_sync(payload: BridgeSyncRequest) -> BridgeSyncResponse:
         return await orchestrator.handle_bridge_sync(payload)
 
@@ -190,7 +219,8 @@ def create_app(orchestrator: TradingOrchestrator) -> FastAPI:
             "symbol_specs": [s.model_dump() for s in orchestrator.specs.values()],
             "llm_provider": orchestrator.env.llm_provider,
             "telegram_configured": bool(orchestrator.env.telegram_bot_token and orchestrator.env.telegram_chat_id),
-            "bridge_token_masked": orchestrator.env.bridge_auth_token[:8] + "..." + orchestrator.env.bridge_auth_token[-4:],
+            "bridge_token_masked": ("..." + orchestrator.env.bridge_auth_token[-4:]) if orchestrator.env.bridge_auth_token else "(not set)",
+            "live_trading_enabled": orchestrator.env.allow_live_trading,
         }
 
     @api.put("/config/risk")
@@ -227,15 +257,30 @@ def create_app(orchestrator: TradingOrchestrator) -> FastAPI:
     # --- Operator Controls (Mode, Pause, Shield Toggle, Manual Close, Two-Step Kill-Switch) ---
     @api.post("/control/mode")
     async def set_mode(req: ModeUpdateRequest) -> dict[str, Any]:
+        if req.trading_mode == TradingMode.MT5_LIVE:
+            if not orchestrator.env.allow_live_trading:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Real-money trading is disabled. Set ALLOW_LIVE_TRADING=true in .env and restart.",
+                )
+            if req.confirm_code.strip().upper() != "LIVE":
+                raise HTTPException(status_code=400, detail="Must supply confirm_code='LIVE' to enter MT5_LIVE")
         orchestrator.config.app.trading_mode = req.trading_mode
         return {"trading_mode": orchestrator.config.app.trading_mode.value}
 
     @api.post("/control/pause")
     async def toggle_pause() -> dict[str, Any]:
+        if orchestrator.risk.killed:
+            raise HTTPException(status_code=409, detail="Kill switch is engaged — release it first (/api/control/kill/release)")
         orchestrator.risk.paused = not orchestrator.risk.paused
-        if not orchestrator.risk.paused:
-            orchestrator.risk.killed = False
         return {"paused": orchestrator.risk.paused, "killed": orchestrator.risk.killed}
+
+    @api.post("/control/kill/release")
+    async def release_kill(req: KillReleaseRequest) -> dict[str, Any]:
+        if req.confirm_code.strip().upper() != "RELEASE":
+            raise HTTPException(status_code=400, detail="Must supply confirm_code='RELEASE'")
+        orchestrator.release_kill_switch()
+        return {"killed": False, "paused": orchestrator.risk.paused}
 
     @api.post("/control/shield-toggle")
     async def toggle_shield_override() -> dict[str, Any]:
@@ -263,11 +308,16 @@ def create_app(orchestrator: TradingOrchestrator) -> FastAPI:
     async def demo_signal(symbol: str = "XAUUSD") -> dict[str, Any]:
         return await orchestrator.force_demo_signal(symbol)
 
+    app.include_router(public)
+    app.include_router(bridge)
     app.include_router(api)
 
-    # --- WebSocket Real-Time Telemetry Stream ---
+    # --- WebSocket Real-Time Telemetry Stream (control token via ?token=) ---
     @app.websocket("/ws/live")
-    async def ws_live(websocket: WebSocket) -> None:
+    async def ws_live(websocket: WebSocket, token: str | None = Query(default=None)) -> None:
+        if not verify_shared_token(token, orchestrator.env.control_api_token):
+            await websocket.close(code=4401)
+            return
         await websocket.accept()
         orchestrator.ws_clients.add(websocket)
         try:

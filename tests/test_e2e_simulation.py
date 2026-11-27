@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from backend.api.routes import create_app
 from backend.bridge.simulator import SimulatedMT5Bridge
 from backend.core.config import EnvSettings, load_trading_config
+from backend.core.models import TradingMode
 from backend.engine.orchestrator import TradingOrchestrator
 from backend.storage.database import Database
 
@@ -18,8 +19,15 @@ def test_e2e_authenticated_bridge_simulation_evolution_and_kill_switch(tmp_path:
     cfg.evolution.wfo_trials = 4
     cfg.evolution.monte_carlo_iterations = 200
     cfg.ai.dl_epochs = 4
+    cfg.app.kill_switch_path = str(tmp_path / "kill.json")
+    cfg.app.trading_mode = TradingMode.MT5_DEMO  # default is paper; this test exercises the demo bridge
 
-    env = EnvSettings(bridge_auth_token="test_bridge_secret_token", llm_provider="deterministic")
+    env = EnvSettings(
+        bridge_auth_token="test_bridge_secret_token",
+        control_api_token="test_control_secret_token_xyz",
+        llm_provider="deterministic",
+        _env_file=None,
+    )
     db = Database(cfg.app.database_path)
     orch = TradingOrchestrator(cfg, env, db)
     app = create_app(orch)
@@ -39,7 +47,7 @@ def test_e2e_authenticated_bridge_simulation_evolution_and_kill_switch(tmp_path:
     asyncio.run(_boot())
 
     try:
-        with TestClient(app) as client:
+        with TestClient(app, headers={"X-Control-Token": "test_control_secret_token_xyz"}) as client:
             # 1. Health endpoint
             assert client.get("/api/health").status_code == 200
 

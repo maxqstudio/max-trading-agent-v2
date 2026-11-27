@@ -109,9 +109,15 @@ class TelegramControlBot:
             self.orch.risk.paused = True
             return "Engine PAUSED (new entries blocked; SL/TP & RL Exit still active)."
         if cmd == "/resume":
+            if self.orch.risk.killed:
+                return "Kill switch is engaged. Send '/unkill confirm' first, then /resume."
             self.orch.risk.paused = False
-            self.orch.risk.killed = False
             return "Engine RESUMED."
+        if cmd == "/unkill":
+            if len(parts) >= 2 and parts[1].lower() == "confirm":
+                self.orch.release_kill_switch()
+                return "Kill switch released. Engine is still PAUSED — send /resume to allow new entries."
+            return "Safety Check: Send '/unkill confirm' to release the kill switch (engine stays paused)."
         if cmd == "/kill":
             if len(parts) >= 2 and parts[1].lower() == "confirm":
                 await self.orch.trigger_flatten_all("TELEGRAM_KILL")
@@ -139,4 +145,4 @@ class TelegramControlBot:
                     self.orch.apply_active_config(self.orch.gate.active_config)
                     return f"Rolled back instantly to Champion {restored.version_id}."
             return "No previous archived snapshot available for rollback."
-        return "Commands: /status /positions /regime /evolve /approve /reject /rollback /pause /resume /kill"
+        return "Commands: /status /positions /regime /evolve /approve /reject /rollback /pause /resume /kill /unkill"
