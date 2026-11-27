@@ -95,96 +95,11 @@ def check_python_and_frontend() -> Path:
     return venv_py
 
 
-def find_metaeditor() -> Path | None:
-    candidates = [
-        Path(r"C:\Program Files\MetaTrader 5\metaeditor64.exe"),
-        Path(r"C:\Program Files\MetaTrader 5\metaeditor.exe"),
-    ]
-    pf = Path(r"C:\Program Files")
-    if pf.exists():
-        for d in pf.glob("*MetaTrader*"):
-            candidates.append(d / "metaeditor64.exe")
-    for c in candidates:
-        if c.exists():
-            return c
-    return None
-
-
 def deploy_and_compile_mt5_ea(token: str) -> list[Path]:
     banner("3/5. Deploying & Compiling MQL5 EA into MetaTrader 5")
-    appdata = Path(os.environ.get("APPDATA", ""))
-    term_root = appdata / "MetaQuotes" / "Terminal"
-    deployed: list[Path] = []
+    import mt5_ea
 
-    if not term_root.exists():
-        print("[WARN] MetaQuotes Terminal folder not found in %APPDATA%. Copy mql5/MaxTradingBridge.mq5 manually.")
-        return deployed
-
-    src_code = MQL5_SRC.read_text(encoding="utf-8")
-    # Inject user's active token as default input in the deployed copy (repo file stays secret-free!)
-    patched_code = re.sub(
-        r'input string\s+BridgeAuthToken\s*=\s*"[^"]*";',
-        f'input string   BridgeAuthToken        = "{token}";',
-        src_code,
-    )
-
-    metaeditor = find_metaeditor()
-    for term_dir in term_root.iterdir():
-        if not term_dir.is_dir():
-            continue
-        experts_dir = term_dir / "MQL5" / "Experts"
-        if not experts_dir.exists():
-            continue
-
-        target_mq5 = experts_dir / "MaxTradingBridge.mq5"
-        target_mq5.write_text(patched_code, encoding="utf-8")
-        print(f"[OK] Deployed EA source -> {target_mq5}")
-        deployed.append(target_mq5)
-
-        # Also drop a ready-to-load MT5 Preset (.set)
-        presets_dir = term_dir / "MQL5" / "Presets"
-        presets_dir.mkdir(parents=True, exist_ok=True)
-        preset_file = presets_dir / "MaxTradingBridge_Demo.set"
-        preset_file.write_text(
-            f"BridgeUrl=http://127.0.0.1:8765/api/bridge/sync\n"
-            f"BridgeAuthToken={token}\n"
-            f"SyncIntervalMs=350\n"
-            f"LogicalSymbols=XAUUSD,EURUSD,GBPUSD,USDJPY\n"
-            f"SymbolSuffix=\n"
-            f"HardMaxDailyDDPct=3.50\n"
-            f"HardMaxLot=0.50\n"
-            f"HardMaxPositions=4\n",
-            encoding="utf-8",
-        )
-
-        if metaeditor is not None:
-            log_file = term_dir / "MQL5" / "Experts" / "MaxTradingBridge_compile.log"
-            if log_file.exists():
-                log_file.unlink()
-            print(f"[INFO] Compiling with {metaeditor.name}...")
-            subprocess.run(
-                [str(metaeditor), f"/compile:{target_mq5}", f"/log:{log_file}"],
-                check=False,
-            )
-            ex5_file = target_mq5.with_suffix(".ex5")
-            if log_file.exists():
-                # MetaEditor writes UTF-16LE logs on Windows
-                raw = log_file.read_bytes()
-                try:
-                    log_text = raw.decode("utf-16")
-                except UnicodeDecodeError:
-                    log_text = raw.decode("utf-8", errors="ignore")
-                for line in log_text.splitlines():
-                    if any(k in line.lower() for k in ("result", "error", "warning")):
-                        print("   ", line.strip())
-            if ex5_file.exists():
-                print(f"[OK] Compiled binary ready -> {ex5_file}")
-            else:
-                print(f"[WARN] Could not verify .ex5 output. Open {target_mq5} in MetaEditor and press F7.")
-
-    if not deployed:
-        print("[WARN] No MT5 MQL5\\Experts directory found. Launch MetaTrader 5 once, then re-run this script.")
-    return deployed
+    return [r.terminal for r in mt5_ea.ensure_ea(token)]
 
 
 def run_automated_tests(venv_py: Path) -> bool:

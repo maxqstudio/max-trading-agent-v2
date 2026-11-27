@@ -20,6 +20,7 @@ cd max-trading-agent-v2
    - Creates `.venv` and installs all Python dependencies (`fastapi`, `numpy`, `scikit-learn`, `aiosqlite`, `pytest`, etc.)
    - Installs & builds the React **Institutional Quant Cockpit** (`frontend/dist`)
    - Auto-detects MetaTrader 5, deploys `MaxTradingBridge.mq5` with your matching `BRIDGE_AUTH_TOKEN` pre-filled, and compiles `MaxTradingBridge.ex5` via `metaeditor64.exe`
+   - `start_all.bat` (MT5 mode) and `start_mt5_live.bat` re-check this on every start: when the repo EA or your token changed, the old copy is saved as `.bak`, the new one is copied and recompiled. MetaEditor is found through the terminal's `origin.txt`, so broker builds work too. Manual run: `python scripts/mt5_ea.py`.
    - Runs the full automated `pytest` verification suite (16 tests)
 
 2. **Test immediately in Built-in Simulator Mode (No MT5 needed)**:
