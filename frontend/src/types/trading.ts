@@ -78,6 +78,7 @@ export interface DecisionEvent {
   side: string;
   message: string;
   latency_ms: number;
+  metadata?: { pnl?: number; pnl_r?: number } & Record<string, unknown>;
 }
 
 export interface BacktestMetrics {
@@ -177,7 +178,7 @@ export interface LiveStateSnapshot {
 }
 
 export interface PaperPosition {
-  book?: 'normal' | 'hitrun';
+  book?: 'normal' | 'hitrun' | 'raw';
   label?: string;
   symbol: string;
   side: 'BUY' | 'SELL';

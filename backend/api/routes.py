@@ -187,15 +187,15 @@ def create_app(orchestrator: TradingOrchestrator) -> FastAPI:
         # LIVE = real MT5 fills (demo or live account), PAPER = virtual SHADOW_ONLY fills,
         # SHADOW = challenger arena.
         # PAPER = Normal paper book, HITRUN = Hit & Run paper book.
-        from backend.engine.orchestrator import HITRUN_VERSION, PAPER_VERSION
+        from backend.engine.orchestrator import HITRUN_VERSION, PAPER_VERSION, RAW_VERSION
 
-        is_shadow = True if mode == "SHADOW" else (False if mode in ("LIVE", "PAPER", "HITRUN") else None)
+        is_shadow = True if mode == "SHADOW" else (False if mode in ("LIVE", "PAPER", "HITRUN", "RAW") else None)
         sym = None if (not symbol or symbol == "ALL") else symbol
         trades = await orchestrator.db.list_trades(
             limit=limit,
             is_shadow=is_shadow,
             symbol=sym,
-            version_id={"PAPER": PAPER_VERSION, "HITRUN": HITRUN_VERSION}.get(mode),
+            version_id={"PAPER": PAPER_VERSION, "HITRUN": HITRUN_VERSION, "RAW": RAW_VERSION}.get(mode),
             exclude_version_prefix="PAPER" if mode == "LIVE" else None,
         )
 

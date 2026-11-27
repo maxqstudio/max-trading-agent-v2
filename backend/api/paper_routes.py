@@ -63,11 +63,12 @@ def register_paper_routes(api: APIRouter, orch: TradingOrchestrator) -> None:
         return {
             "rows": rows,
             "ai_cost_today_usd": ai_cost,
-            "note": "Normal dan Hit & Run memakai setup yang sama (sudah lolos risk + supervisor), jadi biaya AI-nya sama.",
+            "note": "Normal dan Hit & Run memakai setup yang sama (lolos risk + supervisor). Tanpa Veto membuka semua setup yang lolos risk, termasuk yang ditolak Claude.",
             "learning": {
                 "adaptive": orch.config.exits.adaptive,
                 "min_samples": orch.exit_selector.min_samples,
                 "groups": orch.exit_selector.table(),
             },
+            "veto": orch.veto_scoreboard(),
             "settings": {"exits": orch.config.exits.model_dump(), "hit_run": orch.config.paper.hit_run.model_dump()},
         }

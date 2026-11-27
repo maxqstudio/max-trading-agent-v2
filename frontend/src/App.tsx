@@ -24,8 +24,17 @@ import { LiveStatusStrip } from './components/LiveStatusStrip';
 import { PaperCompare } from './components/PaperCompare';
 import { RiskConfigView } from './components/RiskConfigView';
 import { SetupView } from './components/SetupView';
+import type { DecisionEvent } from './types/trading';
 
 type TabId = 'cockpit' | 'brain' | 'evolution' | 'journal' | 'risk' | 'setup';
+
+// Result of a closed trade in the execution stream: from metadata, or parsed from older messages.
+function tradeResult(d: DecisionEvent): number | null {
+  if (typeof d.metadata?.pnl === 'number') return d.metadata.pnl;
+  if (d.category !== 'EXEC' || !/closed/i.test(`${d.tag} ${d.message}`)) return null;
+  const m = d.message.match(/\$([+-]\d+(?:\.\d+)?)|([+-]\d+(?:\.\d+)?)\$/);
+  return m ? parseFloat(m[1] ?? m[2]) : null;
+}
 
 export default function App() {
   const { state, wsConnected } = useLiveTelemetry();
@@ -257,6 +266,7 @@ export default function App() {
               <div className="flex justify-between"><span className="text-[#8A9BB5]">AI Scans</span><span className="mono font-bold">{state?.scans_count ?? 0}</span></div>
               <div className="flex justify-between"><span className="text-[#8A9BB5]">Paper Normal</span><span className="mono font-bold text-[#F59E0B]">${(state?.paper?.books?.normal?.equity ?? state?.paper?.equity ?? 10000).toFixed(0)}</span></div>
               <div className="flex justify-between"><span className="text-[#8A9BB5]">Paper Hit &amp; Run</span><span className="mono font-bold text-[#EC4899]">${(state?.paper?.books?.hitrun?.equity ?? 10000).toFixed(0)}</span></div>
+              <div className="flex justify-between" title="Semua setup yang lolos risk, termasuk yang ditolak Claude"><span className="text-[#8A9BB5]">Paper Tanpa Veto</span><span className="mono font-bold text-[#14B8A6]">${(state?.paper?.books?.raw?.equity ?? 10000).toFixed(0)}</span></div>
               <div className="flex justify-between" title="Versi strategi hasil evolusi yang sedang diuji di samping (challenger)"><span className="text-[#8A9BB5]">Kandidat (Evolusi)</span><span className="mono font-bold text-[#8B5CF6]">${(state?.shadow_equity ?? 10000).toFixed(0)}</span></div>
             </div>
           </div>
@@ -361,7 +371,7 @@ export default function App() {
                       <tbody className="divide-y divide-[#1F2D45]">
                         {paperPositions.map((p) => (
                           <tr key={`paper-${p.book ?? 'normal'}-${p.symbol}`}>
-                            <td className="py-2 px-2"><div className="mono font-bold">{p.symbol} <span className={`px-1 rounded text-[10px] ${p.book === 'hitrun' ? 'bg-[#EC4899]/15 text-[#EC4899]' : 'bg-[#F59E0B]/15 text-[#F59E0B]'}`}>{p.book === 'hitrun' ? 'HIT&RUN' : 'NORMAL'}</span></div><div className="text-[#8A9BB5]">{p.strategy_id}</div></td>
+                            <td className="py-2 px-2"><div className="mono font-bold">{p.symbol} <span className={`px-1 rounded text-[10px] ${p.book === 'hitrun' ? 'bg-[#EC4899]/15 text-[#EC4899]' : p.book === 'raw' ? 'bg-[#14B8A6]/15 text-[#14B8A6]' : 'bg-[#F59E0B]/15 text-[#F59E0B]'}`}>{p.book === 'hitrun' ? 'HIT&RUN' : p.book === 'raw' ? 'TANPA VETO' : 'NORMAL'}</span></div><div className="text-[#8A9BB5]">{p.strategy_id}</div></td>
                             <td className="py-2 px-2 mono"><span className={`px-1.5 py-0.5 rounded font-bold ${p.side === 'BUY' ? 'bg-[#10B981]/15 text-[#10B981]' : 'bg-[#EF4444]/15 text-[#EF4444]'}`}>{p.side}</span> {p.volume}</td>
                             <td className="py-2 px-2 mono">{p.entry_price} → <b>{p.current_price}</b></td>
                             <td className={`py-2 px-2 mono font-bold ${p.profit >= 0 ? 'text-[#10B981]' : 'text-[#EF4444]'}`}>{p.profit >= 0 ? '+' : ''}${p.profit.toFixed(2)}</td>
@@ -419,20 +429,29 @@ export default function App() {
                     {filteredDecisions.length === 0 ? (
                       <div className="py-6 text-center text-xs text-[#8A9BB5]">Awaiting live decision telemetry...</div>
                     ) : (
-                      filteredDecisions.map((d) => (
-                        <div key={d.id} className="p-2 rounded cockpit-sub text-xs space-y-0.5">
+                      filteredDecisions.map((d) => {
+                        const pnl = tradeResult(d);
+                        const tone = pnl == null ? '' : pnl > 0 ? 'win' : 'loss';
+                        return (
+                        <div
+                          key={d.id}
+                          className={`p-2 rounded cockpit-sub text-xs space-y-0.5 ${tone ? 'border-l-4' : ''}`}
+                          style={tone ? { borderLeftColor: tone === 'win' ? '#10B981' : '#EF4444' } : undefined}
+                        >
                           <div className="flex items-center justify-between mono">
                             <span>
                               <span className="text-[#8A9BB5] mr-1.5">{new Date(d.timestamp_ms).toISOString().substring(11, 19)}</span>
                               <b>{d.symbol}</b>
                             </span>
-                            <span className={`px-1.5 py-0.5 rounded font-bold ${d.category === 'EXEC' ? 'bg-[#10B981]/15 text-[#10B981]' : d.category === 'BLOCK' ? 'bg-[#F59E0B]/15 text-[#F59E0B]' : 'bg-[#06B6D4]/15 text-[#06B6D4]'}`}>
+                            <span className={`px-1.5 py-0.5 rounded font-bold ${tone === 'win' ? 'bg-[#10B981]/20 text-[#10B981]' : tone === 'loss' ? 'bg-[#EF4444]/20 text-[#EF4444]' : d.category === 'EXEC' ? 'bg-[#06B6D4]/15 text-[#06B6D4]' : d.category === 'BLOCK' ? 'bg-[#F59E0B]/15 text-[#F59E0B]' : 'bg-[#06B6D4]/15 text-[#06B6D4]'}`}>
                               {d.tag}
+                              {pnl != null ? ` ${pnl > 0 ? '+' : pnl < 0 ? '-' : ''}$${Math.abs(pnl).toFixed(2)}` : ''}
                             </span>
                           </div>
-                          <div className="text-[#8A9BB5] leading-snug">{d.message}</div>
+                          <div className={`leading-snug ${tone === 'win' ? 'text-[#6EE7B7]' : tone === 'loss' ? 'text-[#FCA5A5]' : 'text-[#8A9BB5]'}`}>{d.message}</div>
                         </div>
-                      ))
+                        );
+                      })
                     )}
                   </div>
                 </div>

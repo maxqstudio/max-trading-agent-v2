@@ -169,7 +169,7 @@ def test_paper_compare_and_exit_settings(client):
     c, _, orch = client
     c.portal.call(orch.db.connect)  # the fixture does not start the engine
     r = c.get("/api/paper/compare").json()
-    assert [row["book"] for row in r["rows"]] == ["normal", "hitrun", "mt5"]
+    assert [row["book"] for row in r["rows"]] == ["normal", "hitrun", "raw", "mt5"]
     assert r["learning"]["adaptive"] is True and r["learning"]["min_samples"] == 20
     r = c.put("/api/setup/exits", json={"adaptive": False, "hit_min_net_profit": 2.5, "be_at_r": 0.4}).json()
     assert r["exits"]["adaptive"] is False and r["exits"]["be_at_r"] == 0.4 and r["hit_run"]["min_net_profit"] == 2.5

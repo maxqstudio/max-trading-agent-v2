@@ -219,3 +219,26 @@ def test_shadow_mode_review_logs_without_dispatch(tmp_path: Path) -> None:
     asyncio.run(_run(orch))
     assert not _queued_opens(orch)
     assert orch.recent_decisions[0].tag == "SHADOW ONLY" and "Supervisor APPROVE" in orch.recent_decisions[0].message
+
+
+def test_unvetoed_book_keeps_rejected_setup_and_records_verdict(tmp_path: Path) -> None:
+    """The "Tanpa Veto" book opens before review; a REJECT stops MT5 and the vetoed books only."""
+    orch = _orch(tmp_path, _Fake({"decision": "REJECT", "size_multiplier": 0, "confidence": 0.9, "reason": "chasing"}))
+
+    async def go() -> None:
+        await orch.db.connect()
+        try:
+            orch.ticks["XAUUSD"] = TickSnapshot(symbol="XAUUSD", bid=2602.8, ask=2603.0, spread_points=20, time_msc=0)
+            rd = RiskDecision(True, volume=0.40, adjusted_sl=2600.3, adjusted_tp=2607.8, risk_pct_used=0.5)
+            assess = SimpleNamespace(regime=MarketRegime.TRENDING_BULL)
+            await orch._open_paper_position(
+                "XAUUSD", _signal(), rd, assess, DEFAULT_SPECS["XAUUSD"], 0.63, 0.58, 20.0, books=("raw",), veto="PENDING"
+            )
+            await orch._supervise_then_finalize("ctx", "XAUUSD", _signal(), rd, assess, DEFAULT_SPECS["XAUUSD"], 0.63, 0.58, 0.34, 20.0, 1.0)
+        finally:
+            await orch.db.close()
+
+    asyncio.run(go())
+    assert not _queued_opens(orch)
+    assert "XAUUSD" not in orch.paper_books["normal"].positions
+    assert orch.paper_books["raw"].positions["XAUUSD"].veto == "REJECT"
