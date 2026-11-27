@@ -507,3 +507,95 @@ async def test_fourth_book_raw_hitrun_and_net_r_and_champion_ops_preserve(tmp_pa
         assert tr.pnl_money > 0
     finally:
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_shadow_challenger_respects_ai_supervisor_brief_and_p0_filters(tmp_path):
+    from backend.core.models import DLPrediction
+    from backend.engine.supervisor import SymbolBrief
+    from backend.features.regime import classify_regime
+
+    cfg = TradingConfig()
+    cfg.app.database_path = str(tmp_path / "test_sh.db")
+    cfg.app.snapshots_dir = str(tmp_path / "snaps_sh")
+    cfg.app.kill_switch_path = str(tmp_path / "kill_sh.json")
+    cfg.evolution.auto_warmup_on_backfill = False
+    cfg.supervisor.enabled = True
+    cfg.supervisor.mode = "periodic"
+    cfg.supervisor.review_in_shadow = True
+    env = EnvSettings(bridge_auth_token="a" * 32, control_api_token="b" * 32)
+
+    fake = _FakeDeskBriefProvider({"market_summary": "ok", "symbols": []})
+    rp = ResolvedProvider(
+        preset=PRESETS["anthropic"],
+        api_key="test-key",
+        model="m",
+        fast_model="m-fast",
+        base_url="http://localhost",
+        fallback_models=(),
+    )
+    router = LLMRouter(resolved=[rp], factory=lambda _rp: fake)
+
+    db = Database(cfg.app.database_path)
+    await db.connect()
+    try:
+        orch = TradingOrchestrator(cfg, env, db, llm_router=router)
+        await orch.initialize_from_storage()
+        spec = _xau_spec()
+        orch.specs["XAUUSD"] = spec
+        now_s = int(time.time())
+        bars = [
+            Bar(
+                symbol="XAUUSD",
+                timeframe="M1",
+                timestamp=now_s - (50 - i) * 60,
+                open=2650.0 + (i % 3) * 0.2,
+                high=2652.0 + (i % 3) * 0.2,
+                low=2648.5 + (i % 3) * 0.2,
+                close=2650.5 + (i % 3) * 0.2,
+                volume=100,
+                spread_points=10,
+            )
+            for i in range(50)
+        ]
+        assess = classify_regime(bars)
+        assert assess is not None
+        snap = assess.indicators
+        sig_buy = TradeSignal(
+            symbol="XAUUSD",
+            strategy_id="liquidity_sweep",
+            side=Side.BUY,
+            entry_price=2650.5,
+            sl_price=2647.5,
+            tp_price=2656.5,
+            atr=2.0,
+            regime=MarketRegime.RANGING,
+            confidence=0.80,
+            reason="sweep",
+        )
+        orch.shadow_suite.scan_all = lambda *a, **kw: [sig_buy]
+        dl = DLPrediction(prob_up=0.70, prob_down=0.15, prob_flat=0.15, vol_expansion=0.5, trained=True)
+
+        # 1. AI Supervisor brief says SHORT_ONLY -> Challenger BUY must be rejected, and Champion stats stay 0!
+        orch.supervisor.brief["XAUUSD"] = SymbolBrief(symbol="XAUUSD", bias="SHORT_ONLY", risk_multiplier=1.0, avoid_strategies=[], reason="Bearish")
+        orch.supervisor.brief_updated_ts = time.time()
+        await orch._scan_shadow_challenger("XAUUSD", bars, snap, MarketRegime.RANGING, dl, 10.0, spec, now_s, htf=(1, 1))
+        assert "XAUUSD" not in orch.shadow_positions
+        assert orch.supervisor.stats["reject"] == 0
+
+        # 2. Micro Breakout in RANGING -> Challenger must block via P0 Ranging Breakout guard even when brief allows BOTH!
+        orch.supervisor.brief["XAUUSD"] = SymbolBrief(symbol="XAUUSD", bias="BOTH", risk_multiplier=1.0, avoid_strategies=[], reason="Two-way")
+        bo_sig = sig_buy.model_copy(update={"strategy_id": "micro_breakout"})
+        orch.shadow_suite.scan_all = lambda *a, **kw: [bo_sig]
+        await orch._scan_shadow_challenger("XAUUSD", bars, snap, MarketRegime.RANGING, dl, 10.0, spec, now_s, htf=(1, 1))
+        assert "XAUUSD" not in orch.shadow_positions
+
+        # 3. Liquidity sweep when brief allows LONG_ONLY with risk_multiplier=0.5 -> Challenger opens at 0.5x risk!
+        orch.supervisor.brief["XAUUSD"] = SymbolBrief(symbol="XAUUSD", bias="LONG_ONLY", risk_multiplier=0.5, avoid_strategies=[], reason="Half size")
+        orch.shadow_suite.scan_all = lambda *a, **kw: [sig_buy]
+        await orch._scan_shadow_challenger("XAUUSD", bars, snap, MarketRegime.RANGING, dl, 10.0, spec, now_s, htf=(1, 1))
+        assert "XAUUSD" in orch.shadow_positions
+        assert orch.shadow_positions["XAUUSD"].volume == 0.5
+        assert orch.supervisor.stats["reduce"] == 0  # Champion stats untouched
+    finally:
+        await db.close()

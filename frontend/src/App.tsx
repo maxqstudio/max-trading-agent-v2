@@ -233,7 +233,7 @@ export default function App() {
           {[
             { id: 'cockpit' as TabId, label: 'Execution Cockpit', icon: LayoutGrid },
             { id: 'brain' as TabId, label: 'AI Brain & Regimes', icon: Cpu },
-            { id: 'evolution' as TabId, label: 'Evolusi & Kandidat', icon: RefreshCw, badge: state?.active_challenger ? 1 : 0 },
+            { id: 'evolution' as TabId, label: 'Evolution & Challenger', icon: RefreshCw, badge: state?.active_challenger ? 1 : 0 },
             { id: 'journal' as TabId, label: 'Trade Forensics', icon: FileText },
             { id: 'risk' as TabId, label: 'Risk, Shields & MT5', icon: Shield },
             { id: 'setup' as TabId, label: 'Setup (AI, Supervisor)', icon: Settings },

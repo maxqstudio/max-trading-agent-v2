@@ -141,9 +141,9 @@ export const SetupView: React.FC<{ onToast: (msg: string) => void }> = ({ onToas
     try {
       const r = await api.testLlm(name);
       const x = r.results[0];
-      setTestResults((t) => ({ ...t, [name]: x.ok ? `OK · ${x.model} · ${x.latency_ms}ms` : `GAGAL · ${x.error}` }));
+      setTestResults((t) => ({ ...t, [name]: x.ok ? `OK · ${x.model} · ${x.latency_ms}ms` : `FAILED · ${x.error}` }));
     } catch (e) {
-      setTestResults((t) => ({ ...t, [name]: `GAGAL · ${(e as Error).message}` }));
+      setTestResults((t) => ({ ...t, [name]: `FAILED · ${(e as Error).message}` }));
     } finally {
       setBusy('');
     }
@@ -225,7 +225,7 @@ export const SetupView: React.FC<{ onToast: (msg: string) => void }> = ({ onToas
                   <span
                     className={`px-1.5 py-0.5 rounded mono font-bold text-xs ${p.configured ? 'bg-[#10B981]/15 text-[#10B981]' : 'bg-[#F59E0B]/15 text-[#F59E0B]'}`}
                   >
-                    {p.configured ? 'SIAP' : 'BELUM ADA KEY'}
+                    {p.configured ? 'READY' : 'NO KEY YET'}
                   </span>
                 </div>
                 <div className="flex items-center gap-1">
