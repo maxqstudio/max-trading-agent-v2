@@ -1,7 +1,7 @@
 """Market-structure building blocks: swings, engulfing, supply/demand bases, Ichimoku cloud and
 Bollinger position. Everything here is causal: a value at bar i only uses bars up to i.
 
-These feed the Structure Shift strategy and are appended to the ML meta features, so the models
+Ichimoku itself lives in ``ichimoku.py``. These feed the Structure Shift strategy and are appended to the ML meta features, so the models
 learn how much each one matters instead of the robot treating them as hard rules.
 """
 
@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from backend.core.models import Bar
+from backend.features import ichimoku
 from backend.features.indicators import atr, bollinger
 
 
@@ -111,33 +112,18 @@ def sd_zones(
     return fresh
 
 
-def kumo(highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, tenkan: int = 9, kijun: int = 26, senkou: int = 52) -> tuple[int, float]:
-    """Price against the Ichimoku cloud at the last bar: (+1 above, -1 below, 0 inside or not
-    enough bars, distance from the nearest cloud edge in price). The cloud at bar i is the
-    senkou spans computed ``kijun`` bars earlier, so it only uses past bars."""
-    n = len(closes)
-    at = n - 1 - kijun
-    if at < senkou:
-        return 0, 0.0
-
-    def mid(period: int, end: int) -> float:
-        return (float(highs[end - period + 1 : end + 1].max()) + float(lows[end - period + 1 : end + 1].min())) / 2.0
-
-    span_a = (mid(tenkan, at) + mid(kijun, at)) / 2.0
-    span_b = mid(senkou, at)
-    top, bottom = max(span_a, span_b), min(span_a, span_b)
-    c = float(closes[-1])
-    if c > top:
-        return 1, c - top
-    if c < bottom:
-        return -1, bottom - c
-    return 0, 0.0
+CONTEXT_KEYS = (
+    "demand_near", "supply_near", "kumo", "bb_pos", "engulf",
+    "ichi_score", "ichi_m15", "ichi_tk_cross", "ichi_chikou", "ichi_future_cloud", "ichi_thick_atr", "ichi_kijun_dist_atr",
+)
 
 
-def structure_context(bars: list[Bar]) -> dict[str, float]:
+def structure_context(bars: list[Bar], ichi_m15: int | None = None) -> dict[str, float]:
     """Direction-neutral context at the last bar. ``extract_meta_features`` turns it into
-    with-the-trade / against-the-trade values."""
-    out = {"demand_near": 0.0, "supply_near": 0.0, "kumo": 0.0, "kumo_dist_atr": 0.0, "bb_pos": 0.0, "engulf": 0.0}
+    with-the-trade / against-the-trade values. ``ichi_m15`` is the M15 Ichimoku checklist score
+    (computed from a longer M1 history than ``bars``); None leaves it at 0."""
+    out = dict.fromkeys(CONTEXT_KEYS, 0.0)
+    out["ichi_m15"] = float(ichi_m15 or 0)
     if len(bars) < 40:
         return out
     win = bars[-300:]
@@ -154,9 +140,16 @@ def structure_context(bars: list[Bar]) -> dict[str, float]:
             out["demand_near"] = 1.0
         if z.kind == "supply" and z.low - near <= px <= z.high + near:
             out["supply_near"] = 1.0
-    k, dist = kumo(h, lo, c)
-    out["kumo"] = float(k)
-    out["kumo_dist_atr"] = min(dist / cur_atr, 3.0)
+    ichi = ichimoku.read(h, lo, c, cur_atr)
+    out.update(
+        kumo=float(ichi.price_cloud),
+        ichi_score=float(ichi.score),
+        ichi_tk_cross=ichi.tk_cross,
+        ichi_chikou=float(ichi.chikou),
+        ichi_future_cloud=float(ichi.future_cloud),
+        ichi_thick_atr=min(ichi.cloud_thick_atr, 3.0),
+        ichi_kijun_dist_atr=float(np.clip(ichi.kijun_dist_atr, -3.0, 3.0)),
+    )
     up, mid, _ = bollinger(c[-40:], 20, 2.0)
     half = max(float(up[-1] - mid[-1]), 1e-9)
     out["bb_pos"] = float(np.clip((px - float(mid[-1])) / half, -1.5, 1.5))
@@ -168,10 +161,18 @@ def structure_context(bars: list[Bar]) -> dict[str, float]:
     return out
 
 
+ALIGNED_NAMES = (
+    "sd_zone_align", "kumo_align", "bb_pos_align", "engulf_align",
+    "ichi_score_align", "ichi_m15_align", "ichi_tk_cross_align", "ichi_chikou_align", "ichi_future_cloud_align",
+    "ichi_cloud_thick_atr", "ichi_kijun_dist_align",
+)
+
+
 def aligned_context(ctx: dict[str, float] | None, side_sign: float) -> list[float]:
-    """[sd_zone_align, kumo_align, bb_pos_align, engulf_align] for a trade in ``side_sign``."""
+    """The context signed with a trade in ``side_sign`` (+1 = with the trade), in the order of
+    ``ALIGNED_NAMES``. Checklist scores are scaled to -1..+1; cloud thickness has no side."""
     if not ctx:
-        return [0.0, 0.0, 0.0, 0.0]
+        return [0.0] * len(ALIGNED_NAMES)
     with_zone = ctx.get("demand_near", 0.0) if side_sign > 0 else ctx.get("supply_near", 0.0)
     against_zone = ctx.get("supply_near", 0.0) if side_sign > 0 else ctx.get("demand_near", 0.0)
     return [
@@ -179,4 +180,11 @@ def aligned_context(ctx: dict[str, float] | None, side_sign: float) -> list[floa
         float(ctx.get("kumo", 0.0) * side_sign),
         float(ctx.get("bb_pos", 0.0) * side_sign),
         float(ctx.get("engulf", 0.0) * side_sign),
+        float(ctx.get("ichi_score", 0.0) * side_sign / 5.0),
+        float(ctx.get("ichi_m15", 0.0) * side_sign / 5.0),
+        float(ctx.get("ichi_tk_cross", 0.0) * side_sign),
+        float(ctx.get("ichi_chikou", 0.0) * side_sign),
+        float(ctx.get("ichi_future_cloud", 0.0) * side_sign),
+        float(ctx.get("ichi_thick_atr", 0.0)),
+        float(ctx.get("ichi_kijun_dist_atr", 0.0) * side_sign),
     ]

@@ -14,7 +14,6 @@ from backend.features.indicators import compute_indicator_snapshot
 from backend.features.structure import (
     aligned_context,
     engulfing_at,
-    kumo,
     sd_zones,
     structure_context,
     swings,
@@ -122,9 +121,7 @@ def test_building_blocks():
     zs = sd_zones(np.array([b.open for b in bars]), np.array([b.high for b in bars]), np.array([b.low for b in bars]),
                   np.array([b.close for b in bars]), ar)
     assert zs and zs[0].kind == "demand" and zs[0].pattern == "RBR"
-    up = np.linspace(100, 160, 120)
-    assert kumo(up + 0.5, up - 0.5, up)[0] == 1 and kumo(-up + 0.5, -up - 0.5, -up)[0] == -1
-    assert aligned_context({"demand_near": 1.0, "kumo": -1.0, "bb_pos": 0.5, "engulf": 1.0}, -1.0) == [-1.0, 1.0, -0.5, -1.0]
+    assert aligned_context({"demand_near": 1.0, "kumo": -1.0, "bb_pos": 0.5, "engulf": 1.0}, -1.0)[:4] == [-1.0, 1.0, -0.5, -1.0]
 
 
 def test_meta_features_and_old_models():
@@ -137,7 +134,7 @@ def test_meta_features_and_old_models():
     sig = SimpleNamespace(regime=MarketRegime.RANGING, strategy_id="structure_shift", side=Side.BUY, confidence=0.7)
     snap = compute_indicator_snapshot(bars)
     v = extract_meta_features(sig, snap, 0.1, DLPrediction(), bars[-1].timestamp, structure=ctx)
-    assert len(v) == len(META_FEATURE_NAMES) == 34
+    assert len(v) == len(META_FEATURE_NAMES) == 41
     assert list(v[5:9]) == [0.0, 0.0, 0.0, 0.0] and v[29] == 1.0  # its own column at the end
     assert v[33] in (-1.0, 0.0, 1.0)
     old = CalibratedMetaLabeler()

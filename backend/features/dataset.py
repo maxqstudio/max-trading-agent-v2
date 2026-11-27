@@ -7,7 +7,7 @@ import numpy as np
 from backend.core.models import Bar, DLPrediction, MarketRegime, Side, TradeSignal
 from backend.features.indicators import IndicatorSnapshot, atr, ema
 from backend.features.htf import alignment, session_of
-from backend.features.structure import aligned_context
+from backend.features.structure import ALIGNED_NAMES, aligned_context
 
 REGIME_INDEX: dict[MarketRegime, int] = {
     MarketRegime.TRENDING_BULL: 0,
@@ -63,6 +63,14 @@ META_FEATURE_NAMES: list[str] = [
     "kumo_align",
     "bb_pos_align",
     "engulf_align",
+    # Ichimoku checklist (M1 and M15), Tenkan/Kijun cross, Chikou, future cloud, cloud thickness, Kijun stretch
+    "ichi_score_align",
+    "ichi_m15_align",
+    "ichi_tk_cross_align",
+    "ichi_chikou_align",
+    "ichi_future_cloud_align",
+    "ichi_cloud_thick_atr",
+    "ichi_kijun_dist_align",
 ]
 BASE_META_FEATURES = 24
 
@@ -229,3 +237,6 @@ def extract_meta_features(
     ]
     vec += [1.0 if signal.strategy_id == "structure_shift" else 0.0, *aligned_context(structure, side_sign)]
     return np.array(vec, dtype=np.float64)
+
+
+assert META_FEATURE_NAMES[-len(ALIGNED_NAMES) :] == list(ALIGNED_NAMES)
