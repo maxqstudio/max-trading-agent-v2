@@ -15,8 +15,10 @@ input string   BridgeUrl              = "http://127.0.0.1:8765/api/bridge/sync";
 input string   BridgeAuthToken        = "";      // Filled in by setup_and_test.bat (never commit a real token)
 input int      SyncIntervalMs         = 350;      // Fast poll interval (ms)
 input int      WebTimeoutMs           = 1200;     // HTTP timeout (ms)
-input string   LogicalSymbols         = "XAUUSD,EURUSD,GBPUSD,USDJPY";
-input string   SymbolSuffix           = "";       // e.g. "m" or ".pro" for broker suffix
+input string   LogicalSymbols         = "XAUUSD,EURUSD,GBPUSD,USDJPY"; // Watchlist (plain names). Missing ones are skipped
+input bool     IncludeChartSymbol     = true;     // Also trade the symbol of the chart the EA is on
+input string   SymbolSuffix           = "";       // Leave empty = auto-detect (e.g. ".m", "m", ".pro")
+input string   SymbolPrefix           = "";       // Leave empty = auto-detect
 input ulong    MagicNumber            = 202602;
 
 //--- Independent MQL5 Hard Risk Guard (Safety Net)
@@ -37,6 +39,13 @@ datetime       g_dayStartDate         = 0;
 double         g_dayStartEquity       = 0.0;
 datetime       g_lastPythonHeartbeat  = 0;
 datetime       g_lastSpecPush         = 0;
+string         g_prefix               = "";
+string         g_suffix               = "";
+int            g_lastSyncCode         = 0;
+datetime       g_lastErrorPrint       = 0;
+bool           g_connected            = false;
+
+string BrokerOf(const string logical);  // defined below (auto symbol mapping)
 
 //--- Idempotency Ring Buffer (256 processed client_order_ids)
 string         g_seenOrderIds[256];
@@ -192,7 +201,7 @@ void ExecuteCommand(const string obj) {
    double expPrice  = JsonGetNum(obj, "expected_price");
    long   expMs     = (long)JsonGetNum(obj, "expires_at_ms");
 
-   if(symBrok == "") symBrok = symLog + SymbolSuffix;
+   if(symBrok == "") symBrok = BrokerOf(symLog);
 
    // 1. Idempotency Guard
    if(IsOrderIdSeen(cid)) {
@@ -475,21 +484,107 @@ void ProcessResponse(const string resp) {
 //+------------------------------------------------------------------+
 //| Expert Lifecycle                                                 |
 //+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| Broker symbol auto-detection (prefix/suffix such as XAUUSD.m)    |
+//+------------------------------------------------------------------+
+bool SymbolOk(const string name) {
+   if(name == "") return false;
+   bool custom = false;
+   return SymbolExist(name, custom);
+}
+
+string StripAffixes(const string broker) {
+   string s = broker;
+   if(g_prefix != "" && StringFind(s, g_prefix) == 0) s = StringSubstr(s, StringLen(g_prefix));
+   int ls = StringLen(g_suffix);
+   if(ls > 0 && StringLen(s) > ls && StringSubstr(s, StringLen(s) - ls) == g_suffix) s = StringSubstr(s, 0, StringLen(s) - ls);
+   return s;
+}
+
+// Learn the broker's prefix/suffix from the chart symbol (e.g. chart XAUUSD.m -> suffix ".m").
+void DetectAffixes(string &watch[]) {
+   g_prefix = SymbolPrefix;
+   g_suffix = SymbolSuffix;
+   if(g_prefix != "" || g_suffix != "") return;
+   string chart = _Symbol;
+   for(int i = 0; i < ArraySize(watch); i++) {
+      int at = StringFind(chart, watch[i]);
+      if(watch[i] != "" && at >= 0) {
+         g_prefix = StringSubstr(chart, 0, at);
+         g_suffix = StringSubstr(chart, at + StringLen(watch[i]));
+         return;
+      }
+   }
+   // Chart symbol not in the watchlist: assume 6 letters + suffix (EURJPY.m, BTCUSDm ...)
+   if(StringLen(chart) > 6) g_suffix = StringSubstr(chart, 6);
+}
+
+// Find the broker's name for a plain symbol. Returns "" when the broker does not offer it.
+string ResolveBroker(const string logical) {
+   string cand = g_prefix + logical + g_suffix;
+   if(SymbolOk(cand)) return cand;
+   if(SymbolOk(logical)) return logical;
+   // Last resort: shortest broker symbol that contains the plain name (XAUUSDm, XAUUSD.pro, ...)
+   string best = "";
+   int total = SymbolsTotal(false);
+   for(int k = 0; k < total; k++) {
+      string nm = SymbolName(k, false);
+      if(StringFind(nm, logical) >= 0 && (best == "" || StringLen(nm) < StringLen(best))) best = nm;
+   }
+   return best;
+}
+
+string BrokerOf(const string logical) {
+   for(int i = 0; i < ArraySize(g_logical); i++) if(g_logical[i] == logical) return g_broker[i];
+   return ResolveBroker(logical);
+}
+
+void AddSymbol(const string logical, const string broker) {
+   for(int i = 0; i < ArraySize(g_logical); i++) if(g_logical[i] == logical || g_broker[i] == broker) return;
+   int n = ArraySize(g_logical);
+   ArrayResize(g_logical, n + 1);
+   ArrayResize(g_broker, n + 1);
+   ArrayResize(g_lastBarTime, n + 1);
+   g_logical[n] = logical;
+   g_broker[n] = broker;
+   g_lastBarTime[n] = 0;
+   SymbolSelect(broker, true);
+}
+
+string SyncErrorHint(const int code, const int err) {
+   if(code == -1 && err == 4014) return "URL belum diizinkan. Tools > Options > Expert Advisors > Allow WebRequest, tambah http://127.0.0.1:8765";
+   if(code == -1 && (err == 5203 || err == 4060)) return "Robot (backend) tidak bisa dihubungi. Jalankan start_all.bat dulu";
+   if(code == 401 || code == 403) return "Token salah. Isi BridgeAuthToken = BRIDGE_AUTH_TOKEN dari .env, atau jalankan start_all.bat lagi";
+   if(code == 422) return "Data ditolak backend (422). Perbarui repo dan EA";
+   if(code == 503) return "Backend belum siap / token server lemah. Jalankan start_all.bat --setup";
+   return "Cek jendela robot (start_all.bat) untuk detail";
+}
+
+//+------------------------------------------------------------------+
+//| Expert Lifecycle                                                 |
+//+------------------------------------------------------------------+
 int OnInit() {
    if(StringLen(BridgeAuthToken) < 24 || StringFind(BridgeAuthToken, "change_me") >= 0) {
       Print("MaxTradingBridge: BridgeAuthToken is empty or a placeholder. Copy BRIDGE_AUTH_TOKEN from .env into the EA inputs.");
       return(INIT_PARAMETERS_INCORRECT);
    }
-   int n = StringSplit(LogicalSymbols, ',', g_logical);
-   ArrayResize(g_broker, n);
-   ArrayResize(g_lastBarTime, n);
+   string watch[];
+   int n = StringSplit(LogicalSymbols, ',', watch);
+   for(int i = 0; i < n; i++) { StringTrimLeft(watch[i]); StringTrimRight(watch[i]); StringToUpper(watch[i]); }
+   DetectAffixes(watch);
+   ArrayResize(g_logical, 0);
+   ArrayResize(g_broker, 0);
+   ArrayResize(g_lastBarTime, 0);
+   if(IncludeChartSymbol) AddSymbol(StripAffixes(_Symbol), _Symbol);
    for(int i = 0; i < n; i++) {
-      StringTrimLeft(g_logical[i]);
-      StringTrimRight(g_logical[i]);
-      g_broker[i] = g_logical[i] + SymbolSuffix;
-      g_lastBarTime[i] = 0;
-      SymbolSelect(g_broker[i], true);
+      if(watch[i] == "") continue;
+      string b = ResolveBroker(watch[i]);
+      if(b == "") { Print("MaxTradingBridge: broker tidak punya ", watch[i], ", dilewati"); continue; }
+      AddSymbol(watch[i], b);
    }
+   string mapping = "";
+   for(int i = 0; i < ArraySize(g_logical); i++) mapping += (i > 0 ? ", " : "") + g_logical[i] + "=" + g_broker[i];
+   Print("MaxTradingBridge: prefix='", g_prefix, "' suffix='", g_suffix, "' symbols: ", mapping);
    g_dayStartEquity      = AccountInfoDouble(ACCOUNT_EQUITY);
    g_dayStartDate        = TimeGMT();
    g_lastPythonHeartbeat = TimeGMT();
@@ -517,13 +612,28 @@ void OnTimer() {
    string resultHeaders;
    string headers = "Content-Type: application/json\r\nX-Bridge-Token: " + BridgeAuthToken + "\r\n";
 
+   ResetLastError();
    int code = WebRequest("POST", BridgeUrl, headers, WebTimeoutMs, postData, result, resultHeaders);
+   int err = GetLastError();
    if(code == 200) {
       g_lastPythonHeartbeat = TimeGMT();
+      if(!g_connected) {
+         Print("MaxTradingBridge: TERHUBUNG ke robot (", BridgeUrl, ")");
+         Comment("MaxTradingBridge v2.00 | TERHUBUNG ke robot | ", ArraySize(g_logical), " simbol");
+      }
+      g_connected = true;
       string respStr = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
       ProcessResponse(respStr);
-   } else if(TimeGMT() - g_lastPythonHeartbeat > HeartbeatTimeoutSec) {
-      Comment("MaxTradingBridge v2.00 | WATCHDOG: Python Brain offline (", code, ") — New entries frozen.");
+   } else {
+      // Always say why the sync failed (at most every 10 s), so the Experts tab is never silent.
+      if(g_connected || code != g_lastSyncCode || TimeGMT() - g_lastErrorPrint >= 10) {
+         string hint = SyncErrorHint(code, err);
+         Print("MaxTradingBridge: sync GAGAL (http=", code, ", err=", err, "). ", hint);
+         Comment("MaxTradingBridge v2.00 | TIDAK TERHUBUNG (http=", code, ", err=", err, ")\n", hint);
+         g_lastErrorPrint = TimeGMT();
+      }
+      g_connected = false;
    }
+   g_lastSyncCode = code;
 }
 //+------------------------------------------------------------------+
