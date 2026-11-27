@@ -3,6 +3,23 @@ import type { LiveStateSnapshot } from '../types/trading';
 
 const TOKEN_KEY = 'mta2_control_token';
 
+// start_all.bat opens the dashboard as http://127.0.0.1:8765/#token=... so nobody has to paste it.
+// The fragment never reaches the server; it is saved here and removed from the address bar.
+(function takeTokenFromUrl() {
+  try {
+    const m = window.location.hash.match(/token=([^&]+)/);
+    if (m) {
+      localStorage.setItem(TOKEN_KEY, decodeURIComponent(m[1]));
+      window.history.replaceState(null, '', window.location.pathname + window.location.search);
+    }
+  } catch {
+    // ignore: falls back to the prompt
+  }
+})();
+
+let promptOpen = false;
+let lastPromptMs = 0;
+
 // CONTROL_API_TOKEN from your .env. Kept only in this browser's localStorage.
 export function getControlToken(): string {
   try {
@@ -13,7 +30,17 @@ export function getControlToken(): string {
 }
 
 function askForControlToken(): string {
-  const t = (window.prompt('Masukkan CONTROL_API_TOKEN dari file .env (sekali saja, disimpan di browser ini):') || '').trim();
+  // Ask at most once every 20 s so background polling never spams prompts.
+  if (promptOpen || Date.now() - lastPromptMs < 20000) return getControlToken();
+  promptOpen = true;
+  const t = (
+    window.prompt(
+      'Dashboard butuh CONTROL_API_TOKEN dari file .env.\n' +
+        'start_all.bat sudah menyalinnya ke clipboard: tekan Ctrl+V lalu OK.',
+    ) || ''
+  ).trim();
+  promptOpen = false;
+  lastPromptMs = Date.now();
   try {
     if (t) localStorage.setItem(TOKEN_KEY, t);
   } catch {
