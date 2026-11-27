@@ -91,7 +91,7 @@ def test_without_metaeditor_still_copies_and_explains(tmp_path, monkeypatch):
     monkeypatch.setattr(mt5_ea, "find_metaeditor", lambda term_dir=None: None)
     term = make_terminal(tmp_path / "AppData")
     res = mt5_ea.ensure_ea(TOKEN, appdata=tmp_path / "AppData", verbose=False)
-    assert res[0].compiled is None and "F7" in res[0].notes[0]
+    assert res[0].compiled is None and "Compile" in res[0].notes[0]
     assert (term / "MQL5" / "Experts" / "MaxTradingBridge.mq5").exists()
 
 

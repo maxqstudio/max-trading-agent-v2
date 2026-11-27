@@ -38,19 +38,19 @@ def step(n: int, total: int, text: str) -> None:
 def ensure_install() -> Path:
     py = venv_python()
     if not py.exists():
-        print("  Instalasi pertama: menjalankan setup lengkap (venv, dependency, dashboard, EA MT5, tes)...")
+        print("  First install: running the full setup (venv, dependencies, dashboard, MT5 EA, tests)...")
         subprocess.run([sys.executable, str(ROOT / "scripts" / "setup_all.py")], cwd=ROOT, check=False)
         py = venv_python()
         if not py.exists():
-            raise SystemExit("  [ERROR] Gagal membuat .venv. Pastikan Python 3.11+ terpasang lalu coba lagi.")
+            raise SystemExit("  [ERROR] Could not create .venv. Make sure Python 3.11+ is installed, then try again.")
         return py
     # Existing install: make sure new dependencies (e.g. the anthropic SDK) are present.
     probe = subprocess.run([str(py), "-c", "import anthropic, fastapi, sklearn"], cwd=ROOT, capture_output=True)
     if probe.returncode != 0:
-        print("  Memperbarui dependency Python...")
+        print("  Updating Python dependencies...")
         subprocess.run([str(py), "-m", "pip", "install", "-q", "-e", ".[dev]"], cwd=ROOT, check=False)
     else:
-        print("  [OK] Python & dependency siap")
+        print("  [OK] Python and dependencies ready")
     return py
 
 
@@ -66,7 +66,7 @@ def ensure_mt5_ea() -> None:
 
         mt5_ea.ensure_ea(env_value("BRIDGE_AUTH_TOKEN"))
     except Exception as exc:  # noqa: BLE001 - never block startup on the EA install
-        print(f"  [WARN] EA MT5 belum terpasang otomatis ({type(exc).__name__}). Jalankan: python scripts/mt5_ea.py")
+        print(f"  [WARN] MT5 EA was not installed automatically ({type(exc).__name__}). Run: python scripts/mt5_ea.py")
 
 
 def dashboard_is_current() -> bool:
@@ -83,13 +83,13 @@ def dashboard_is_current() -> bool:
 
 def ensure_dashboard() -> None:
     if dashboard_is_current():
-        print("  [OK] Dashboard sudah ter-build")
+        print("  [OK] Dashboard already built")
         return
     npm = shutil.which("npm.cmd") or shutil.which("npm")
     if not npm:
-        print("  [WARN] npm tidak ditemukan: API tetap jalan, tapi dashboard belum ada. Install Node.js lalu jalankan lagi.")
+        print("  [WARN] npm not found: the API still runs, but there is no dashboard. Install Node.js and run this again.")
         return
-    print("  Membangun dashboard...")
+    print("  Building the dashboard...")
     if not (ROOT / "frontend" / "node_modules").exists():
         subprocess.run([npm, "--prefix", str(ROOT / "frontend"), "install"], check=False)
     subprocess.run([npm, "--prefix", str(ROOT / "frontend"), "run", "build"], check=False)
@@ -98,10 +98,10 @@ def ensure_dashboard() -> None:
 def ensure_llm(py: Path) -> None:
     res = subprocess.run([str(py), str(ROOT / "scripts" / "llm_setup.py"), "--check"], cwd=ROOT, capture_output=True, text=True)
     if res.returncode == 0:
-        print(f"  [OK] AI provider aktif: {res.stdout.strip()}")
+        print(f"  [OK] AI provider active: {res.stdout.strip()}")
         return
-    print("  Belum ada API key AI (Claude/Gemini/OpenAI). Tanpa key, robot jalan dengan mode deterministik.")
-    if input("  Setup sekarang? (y/n) [y]: ").strip().lower() in ("", "y", "ya", "yes"):
+    print("  No AI API key yet (Claude/Gemini/OpenAI). Without a key the robot runs in deterministic mode.")
+    if input("  Set up now? (y/n) [y]: ").strip().lower() in ("", "y", "ya", "yes"):
         subprocess.run([str(py), str(ROOT / "scripts" / "llm_setup.py")], cwd=ROOT, check=False)
 
 
@@ -127,9 +127,9 @@ def copy_to_clipboard(text: str) -> bool:
 
 
 def choose_mode() -> bool:
-    print("  1. SIMULATOR  : pasar simulasi bawaan, tanpa MetaTrader (paling cepat untuk mencoba)")
-    print("  2. MT5 BRIDGE : terhubung ke MetaTrader 5. Default PAPER (SHADOW_ONLY), tidak kirim order")
-    ans = input("  Pilih mode (1/2) [1]: ").strip()
+    print("  1. SIMULATOR  : built-in simulated market, no MetaTrader (fastest way to try it)")
+    print("  2. MT5 BRIDGE : connects to MetaTrader 5. Default PAPER (SHADOW_ONLY), sends no orders")
+    ans = input("  Choose mode (1/2) [1]: ").strip()
     return ans != "2"
 
 
@@ -157,18 +157,18 @@ def launch(py: Path, sim: bool) -> int:
     live = env_value("ALLOW_LIVE_TRADING").lower() == "true"
     token = env_value("CONTROL_API_TOKEN")
     print("\n" + "-" * 64)
-    print(f"  Mode        : {'SIMULATOR' if sim else 'MT5 BRIDGE (paper / SHADOW_ONLY sampai kamu ganti di dashboard)'}")
-    print(f"  Uang asli   : {'DIIZINKAN di .env (hati-hati!)' if live else 'TERKUNCI (ALLOW_LIVE_TRADING=false)'}")
+    print(f"  Mode        : {'SIMULATOR' if sim else 'MT5 BRIDGE (paper / SHADOW_ONLY until you change it in the dashboard)'}")
+    print(f"  Real money  : {'ALLOWED in .env (careful!)' if live else 'LOCKED (ALLOW_LIVE_TRADING=false)'}")
     if token:
         copied = copy_to_clipboard(token)
-        where = "juga disalin ke clipboard" if copied else "lengkapnya di file .env (CONTROL_API_TOKEN)"
-        print(f"  Token login : ...{token[-4:]} — otomatis dikirim ke dashboard, {where}")
+        where = "also copied to the clipboard" if copied else "full value in the .env file (CONTROL_API_TOKEN)"
+        print(f"  Token login : ...{token[-4:]} — sent to the dashboard automatically, {where}")
     if not sim:
-        print("  MT5         : EA 'MaxTradingBridge' sudah dipasang otomatis (token sudah terisi).")
-        print("                Di MT5: Tools > Options > Expert Advisors > izinkan WebRequest ke " + URL)
-        print("                lalu drag EA ke chart XAUUSD M1 dan nyalakan Algo Trading.")
-    print(f"  Dashboard   : {URL}   (tutup jendela ini atau Ctrl+C untuk berhenti)")
-    print("  Ganti mode / ulang setup: jalankan  start_all.bat --setup")
+        print("  MT5         : EA 'MaxTradingBridge' installed automatically (token already filled in).")
+        print("                In MT5: Tools > Options > Expert Advisors > allow WebRequest to " + URL)
+        print("                then drag the EA onto an XAUUSD M1 chart and turn on Algo Trading.")
+    print(f"  Dashboard   : {URL}   (close this window or press Ctrl+C to stop)")
+    print("  Change mode / redo setup: run  start_all.bat --setup")
     print("-" * 64 + "\n")
 
     # The token rides in the URL fragment (never sent to the server); the dashboard saves it.
@@ -178,7 +178,7 @@ def launch(py: Path, sim: bool) -> int:
     try:
         return subprocess.run(cmd, cwd=ROOT).returncode
     except KeyboardInterrupt:
-        print("\nBerhenti. Sampai jumpa!")
+        print("\nStopped. Bye!")
         time.sleep(0.5)
         return 0
 
@@ -186,7 +186,7 @@ def launch(py: Path, sim: bool) -> int:
 def main() -> int:
     os.chdir(ROOT)
     print("=" * 64)
-    print("  MAX TRADING AGENT v2 — START ALL (1 klik)")
+    print("  MAX TRADING AGENT v2 — START ALL (one click)")
     print("=" * 64)
 
     if already_set_up() and "--setup" not in sys.argv:
@@ -194,10 +194,10 @@ def main() -> int:
         py = venv_python()
         probe = subprocess.run([str(py), "-c", "import anthropic, fastapi, sklearn"], cwd=ROOT, capture_output=True)
         if probe.returncode != 0:
-            print("  Memperbarui dependency Python...")
+            print("  Updating Python dependencies...")
             subprocess.run([str(py), "-m", "pip", "install", "-q", "-e", ".[dev]"], cwd=ROOT, check=False)
         if not dashboard_is_current():
-            print("  Dashboard diperbarui, membangun ulang...")
+            print("  Dashboard changed, rebuilding...")
             ensure_dashboard()
         sim = env_value("START_MODE") == "sim"
         if not sim:
@@ -205,20 +205,20 @@ def main() -> int:
         return launch(py, sim)
 
     total = 6
-    step(1, total, "Cek instalasi")
+    step(1, total, "Check installation")
     py = ensure_install()
-    step(2, total, "Cek .env & token keamanan")
+    step(2, total, "Check .env and security tokens")
     ensure_env()
-    step(3, total, "Cek dashboard")
+    step(3, total, "Check dashboard")
     ensure_dashboard()
-    step(4, total, "Cek AI provider (Claude dulu)")
+    step(4, total, "Check AI provider (Claude first)")
     ensure_llm(py)
-    step(5, total, "Pilih mode")
+    step(5, total, "Choose mode")
     sim = choose_mode()
     set_env_value("START_MODE", "sim" if sim else "mt5")
-    step(6, total, "Pasang EA MetaTrader 5")
+    step(6, total, "Install the MetaTrader 5 EA")
     if sim:
-        print("  Dilewati (mode SIMULATOR)")
+        print("  Skipped (SIMULATOR mode)")
     else:
         ensure_mt5_ea()
     return launch(py, sim)

@@ -222,7 +222,7 @@ def test_shadow_mode_review_logs_without_dispatch(tmp_path: Path) -> None:
 
 
 def test_unvetoed_book_keeps_rejected_setup_and_records_verdict(tmp_path: Path) -> None:
-    """The "Tanpa Veto" book opens before review; a REJECT stops MT5 and the vetoed books only."""
+    """The "No Veto" book opens before review; a REJECT stops MT5 and the vetoed books only."""
     orch = _orch(tmp_path, _Fake({"decision": "REJECT", "size_multiplier": 0, "confidence": 0.9, "reason": "chasing"}))
 
     async def go() -> None:

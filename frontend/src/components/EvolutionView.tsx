@@ -31,7 +31,7 @@ export const EvolutionView: React.FC<Props> = ({ onToast }) => {
     setBusy(true);
     try {
       const res = await api.runEvolution();
-      onToast(`Siklus evolusi: ${human(res.status)}`);
+      onToast(`Evolution cycle: ${human(res.status)}`);
       await load();
     } catch (e: any) {
       onToast(`Evolution error: ${e.message}`);

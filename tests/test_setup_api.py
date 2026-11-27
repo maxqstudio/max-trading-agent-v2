@@ -175,6 +175,13 @@ def test_paper_compare_and_exit_settings(client):
     assert r["exits"]["adaptive"] is False and r["exits"]["be_at_r"] == 0.4 and r["hit_run"]["min_net_profit"] == 2.5
     assert c.get("/api/paper/compare").json()["learning"]["adaptive"] is False
     assert c.put("/api/setup/exits", json={"be_at_r": 9}).status_code == 422
+    r = c.put("/api/setup/exits", json={"hit_max_loss_mult": 3, "hit_sl_atr_mult": 0.9, "hit_time_stop_bars": 0, "hit_own_stop": True}).json()
+    hr = r["hit_run"]
+    assert hr["max_loss_mult"] == 3 and hr["sl_atr_mult"] == 0.9 and hr["time_stop_bars"] == 0 and hr["min_net_profit"] == 2.5
+    assert c.get("/api/setup").json()["hit_run"]["sl_atr_mult"] == 0.9
+    comp = c.get("/api/paper/compare").json()
+    assert comp["hitrun_learning"]["default"].startswith("SL 0.9x ATR") and "breakeven_win_rate" in comp["rows"][0]
+    assert c.put("/api/setup/exits", json={"hit_max_loss_mult": 0.5}).status_code == 422
 
 
 def test_broker_costs_learned_from_mt5_and_manual_override(client):

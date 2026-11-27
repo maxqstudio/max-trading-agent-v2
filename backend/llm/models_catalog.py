@@ -34,9 +34,9 @@ async def list_models(rp: ResolvedProvider, transport: httpx.AsyncBaseTransport 
         async with httpx.AsyncClient(timeout=timeout_s, transport=transport) as client:
             r = await client.get(url, headers=headers)
     except httpx.HTTPError as exc:
-        raise ModelListError(_clean(f"Tidak bisa menghubungi {rp.base_url}: {type(exc).__name__}", key)) from None
+        raise ModelListError(_clean(f"Could not reach {rp.base_url}: {type(exc).__name__}", key)) from None
     if r.status_code in (401, 403):
-        raise ModelListError("API key ditolak provider (401/403). Cek lagi key-nya.")
+        raise ModelListError("The provider rejected the API key (401/403). Check the key.")
     if r.status_code >= 400:
         raise ModelListError(_clean(f"HTTP {r.status_code}: {r.text[:200]}", key))
     try:

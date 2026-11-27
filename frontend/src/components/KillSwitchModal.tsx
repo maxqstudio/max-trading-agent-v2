@@ -29,14 +29,14 @@ export const KillSwitchModal: React.FC<Props> = ({ open, onClose, onSoftPause, o
         </div>
 
         <p className="text-xs text-[#8A9BB5]">
-          Pilih protokol penghentian. Perintah langsung dikirim ke MQL5 EA pada siklus sinkronisasi berikutnya.
+          Choose a stop protocol. The command goes to the MQL5 EA on the next sync.
         </p>
 
         <div className="space-y-3 text-xs">
           <div className="p-3 rounded-lg cockpit-sub flex items-center justify-between gap-3">
             <div>
               <div className="font-bold text-[#E6EDF7]">Level 1 — Soft Entry Pause</div>
-              <div className="text-[#8A9BB5] mt-0.5">Hentikan entry baru; posisi aktif tetap dijaga SL/TP & RL-2 Exit.</div>
+              <div className="text-[#8A9BB5] mt-0.5">Stop new entries; open positions stay managed by SL/TP and the RL exit.</div>
             </div>
             <button
               disabled={busy}
@@ -55,7 +55,7 @@ export const KillSwitchModal: React.FC<Props> = ({ open, onClose, onSoftPause, o
           <div className="p-3 rounded-lg cockpit-sub border border-[#EF4444]/50 space-y-2.5">
             <div>
               <div className="font-bold text-[#EF4444]">Level 2 — FLATTEN ALL & HARD LOCK</div>
-              <div className="text-[#8A9BB5] mt-0.5">Tutup paksa seluruh posisi MT5 & kunci sistem sampai di-resume manual.</div>
+              <div className="text-[#8A9BB5] mt-0.5">Force close every MT5 position and lock the system until resumed by hand.</div>
             </div>
             <div className="flex gap-2">
               <input
