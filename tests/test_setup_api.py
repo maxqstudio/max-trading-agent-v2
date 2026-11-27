@@ -214,3 +214,17 @@ def test_broker_costs_learned_from_mt5_and_manual_override(client):
     assert row["commission_source"] == "manual" and row["commission_per_lot"] == 3.5
     assert row["slippage_source"] == "mt5"
     assert orch._net_take(sym).commission_per_lot == 3.5
+
+
+def test_filters_setup_api(client):
+    c, _, orch = client
+    c.portal.call(orch.db.connect)
+    view = c.get("/api/setup").json()["filters"]
+    assert view["settings"]["htf_mode"] == "auto" and set(view["htf"]) == {"M15", "H1", "BOTH"}
+    r = c.put("/api/setup/filters", json={"htf_mode": "on", "htf_timeframe": "BOTH", "session_mode": "on",
+                                          "blocked_sessions": ["asia"], "news_enabled": False, "news_buffer_minutes": 30})
+    assert r.status_code == 200, r.text
+    assert r.json()["settings"]["htf_timeframe"] == "BOTH" and r.json()["news"]["buffer_minutes"] == 30
+    assert orch.shields.config.news_blackout_enabled is False  # live shields see the change
+    assert c.put("/api/setup/filters", json={"htf_mode": "maybe"}).status_code == 422
+    assert c.put("/api/setup/filters", json={"blocked_sessions": ["mars"]}).status_code == 422

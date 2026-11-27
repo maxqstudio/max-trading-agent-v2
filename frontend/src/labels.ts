@@ -51,6 +51,8 @@ const LABELS: Record<string, string> = {
   SPREAD_SPIKE: 'Spread spike',
   NEWS_BLACKOUT: 'News blackout',
   OFF_SESSION: 'Outside session',
+  SESSION_FILTER: 'Session filter',
+  HTF_AGAINST: 'Against M15/H1 direction',
   ROLLOVER_BLACKOUT: 'Rollover blackout',
   SHOCK_COOLDOWN: 'Cooldown after spike',
   SOFT_PAUSE: 'Soft pause',

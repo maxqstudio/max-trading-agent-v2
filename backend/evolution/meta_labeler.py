@@ -130,6 +130,9 @@ class CalibratedMetaLabeler:
             sp_pen = np.clip(x[:, 17] * 0.25, 0.0, 0.25)
             dl_boost = (x[:, 20] - 0.33) * 0.25
             return np.clip(raw_conf - sp_pen + dl_boost, 0.25, 0.85)
+        n_in = getattr(self.model, "n_features_in_", None)
+        if n_in is not None and x.shape[1] > n_in:
+            x = x[:, :n_in]  # model trained before newer features were appended
         probs = self.model.predict_proba(x)
         if probs.shape[1] == 2:
             return probs[:, 1]

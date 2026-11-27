@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import deque
+from datetime import datetime, timezone
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -35,6 +36,7 @@ from backend.evolution.llm_reflector import LLMReflectionAnalyst
 from backend.llm.router import LLMRouter
 from backend.engine.exit_policy import NetTake, ProfitLock, evaluate, net_take
 from backend.engine.exit_selector import ExitStyleSelector
+from backend.engine.filters import HTF_BUCKETS, SESSIONS, FilterLearner, decide
 from backend.engine.hitrun_stop import Ghost, HitRunArm, HitRunPlan, HitRunTuner, plan_stop, time_stop_due
 from backend.engine.supervisor import SupervisorSettings, TradeSupervisor, build_context, price_drifted, scale_volume
 from backend.evolution.meta_labeler import CalibratedMetaLabeler
@@ -42,6 +44,7 @@ from backend.evolution.optimizer import PurgedWalkForwardOptimizer
 from backend.evolution.rl_exit_agent import RLExitAgent
 from backend.evolution.sequence_net import SequenceConvNet
 from backend.features.dataset import build_sequence_tensor, extract_meta_features
+from backend.features.htf import alignment, htf_bias, session_of
 from backend.features.regime import classify_regime
 from backend.risk.manager import DEFAULT_SPECS, PortfolioRiskManager
 from backend.risk.shields import MarketShields
@@ -69,6 +72,9 @@ class ShadowPosition:
     volume: float = 0.10
     veto: str = ""  # No Veto book: what the supervisor said about this setup (evaluation only)
     time_stop_bars: int = 0  # Hit & Run book: close if not in net profit after this many M1 bars
+    htf_m15: int = 0  # entry context: +1 with the M15 direction, -1 against, 0 none
+    htf_h1: int = 0
+    session: str = ""
 
 
 PAPER_VERSION = "PAPER"  # Normal book (kept for journal compatibility)
@@ -81,6 +87,8 @@ PAPER_LABELS: dict[str, str] = {"normal": "Normal", "hitrun": "Hit & Run", "raw"
 VETOED_BOOKS = ("normal", "hitrun")
 VETO_KEYS = ("APPROVE", "REDUCE", "REJECT", "NONE")
 PAPER_START_EQUITY = 10000.0
+BAR_BUFFER = 2000  # M1 bars kept per symbol: about 33 hours, enough for the H1 direction
+SIGNAL_BARS = 600  # what the strategies, regime and models look at
 
 
 @dataclass
@@ -145,7 +153,7 @@ class TradingOrchestrator:
         self.active_thought: str = "Initializing 4-pillar hybrid AI brain & awaiting live MT5 ticks..."
 
         # Market buffers & live per-symbol cockpit telemetry
-        self.bars: dict[str, deque[Bar]] = {s: deque(maxlen=600) for s in config.instruments.symbols}
+        self.bars: dict[str, deque[Bar]] = {s: deque(maxlen=BAR_BUFFER) for s in config.instruments.symbols}
         self.ticks: dict[str, TickSnapshot] = {}
         self.regimes: dict[str, MarketRegime] = {s: MarketRegime.RANGING for s in config.instruments.symbols}
         self.dl_preds: dict[str, DLPrediction] = {s: DLPrediction() for s in config.instruments.symbols}
@@ -191,6 +199,8 @@ class TradingOrchestrator:
         # "normal" = existing exits + profit lock, "hitrun" = take profit fast.
         self.exit_selector = ExitStyleSelector(min_samples=config.exits.adaptive_min_samples)
         self.hitrun_tuner = HitRunTuner(min_samples=config.paper.hit_run.adaptive_min_samples)
+        self.filter_learner = FilterLearner(min_samples=config.filters.min_samples)
+        self.server_offset_sec = 0  # broker server time minus UTC (bar timestamps are server time)
         self.veto_stats: dict[str, dict[str, float]] = {}
         self.learned_costs: dict[str, dict[str, float]] = {}  # per symbol, from closed MT5 trades
         self.paper_books: dict[str, PaperBook] = {
@@ -208,7 +218,7 @@ class TradingOrchestrator:
     async def initialize_from_storage(self) -> None:
         """Crash recovery & state restoration on startup."""
         for sym in self.config.instruments.symbols:
-            saved_bars = await self.db.load_recent_bars(sym, "M1", limit=500)
+            saved_bars = await self.db.load_recent_bars(sym, "M1", limit=BAR_BUFFER)
             if saved_bars:
                 self.bars[sym].extend(saved_bars)
 
@@ -259,6 +269,8 @@ class TradingOrchestrator:
         await self._rebuild_exit_selector()
         self.veto_stats = await self.db.get_kv("veto_stats") or {}
         self.hitrun_tuner.load(await self.db.get_kv("hitrun_tuner"))
+        self.filter_learner.load(await self.db.get_kv("filter_stats"))
+        self.server_offset_sec = int(await self.db.get_kv("server_offset_sec") or 0)
         await self._learn_broker_costs()
         self.order_sm.import_tracking(await self.db.get_kv("mt5_tracking"))
         self._tracking_sig = tuple(sorted(self.order_sm.active_positions))
@@ -318,7 +330,7 @@ class TradingOrchestrator:
             return
         self.config.instruments.symbols.append(sym)
         self.specs.setdefault(sym, DEFAULT_SPECS.get(sym, DEFAULT_SPECS["XAUUSD"]).model_copy(deep=True))
-        self.bars.setdefault(sym, deque(maxlen=600))
+        self.bars.setdefault(sym, deque(maxlen=BAR_BUFFER))
         self.regimes.setdefault(sym, MarketRegime.RANGING)
         self.dl_preds.setdefault(sym, DLPrediction())
         self.readiness.setdefault(sym, 35)
@@ -351,6 +363,22 @@ class TradingOrchestrator:
         self.account = req.account
         if req.hard_guard is not None:
             self.hard_guard = req.hard_guard
+        if req.server_utc_offset_sec is not None and req.server_utc_offset_sec != self.server_offset_sec:
+            self.server_offset_sec = int(req.server_utc_offset_sec)
+            await self.db.set_kv("server_offset_sec", self.server_offset_sec, now_ms)
+        if req.calendar is not None:
+            self.shields.set_live_news(
+                [
+                    {
+                        "title": f"{ev.currency} {ev.title}",
+                        "currencies": ["XAU", "USD"] if ev.currency == "USD" else [ev.currency],
+                        "timestamp_utc": datetime.fromtimestamp(ev.time_utc, timezone.utc).isoformat(),
+                        "impact": ev.impact,
+                    }
+                    for ev in req.calendar
+                ],
+                now_sec,
+            )
 
         # 2. Process order ACKs & reconcile MT5 positions (Single Source of Truth)
         acks = self.order_sm.process_acks(req.acks)
@@ -445,7 +473,7 @@ class TradingOrchestrator:
         if req.closed_bars:
             await self.db.save_bars(req.closed_bars)
             for bar in req.closed_bars:
-                buf = self.bars.setdefault(bar.symbol, deque(maxlen=600))
+                buf = self.bars.setdefault(bar.symbol, deque(maxlen=BAR_BUFFER))
                 if not buf or bar.timestamp > buf[-1].timestamp:
                     buf.append(bar)
                 await self._evaluate_symbol_on_bar_close(bar, now_sec)
@@ -495,7 +523,8 @@ class TradingOrchestrator:
         t0 = time.perf_counter()
         sym = bar.symbol
         self.scans_count += 1
-        bar_list = list(self.bars.get(sym, ()))
+        all_bars = list(self.bars.get(sym, ()))
+        bar_list = all_bars[-SIGNAL_BARS:]
         if len(bar_list) < 40:
             return
 
@@ -530,7 +559,8 @@ class TradingOrchestrator:
         signals = self.suite.scan_all(sym, bar_list, assess.indicators, assess.regime)
 
         # Also evaluate Challenger in parallel Live Shadow Arena!
-        await self._scan_shadow_challenger(sym, bar_list, assess.indicators, assess.regime, dl_pred, spread_pts, spec, now_sec)
+        htf = (htf_bias(all_bars, 15), htf_bias(all_bars, 60))
+        await self._scan_shadow_challenger(sym, bar_list, assess.indicators, assess.regime, dl_pred, spread_pts, spec, now_sec, htf)
 
         if not signals:
             # Compute live hunting readiness from indicator alignment so Cockpit always shows active hunt progress
@@ -550,7 +580,15 @@ class TradingOrchestrator:
 
         # Pillar 2 (ML): Calibrated Meta-Labeler predicts P(win)
         spread_price = spread_pts * spec.point
-        feat_vec = extract_meta_features(best_sig, assess.indicators, spread_price, dl_pred, bar.timestamp)
+        feat_vec = extract_meta_features(
+            best_sig, assess.indicators, spread_price, dl_pred, bar.timestamp, htf=htf, server_offset_sec=self.server_offset_sec,
+        )
+        side_sign = 1.0 if best_sig.side == Side.BUY else -1.0
+        entry_ctx = {
+            "htf_m15": alignment(side_sign, htf[0]),
+            "htf_h1": alignment(side_sign, htf[1]),
+            "session": session_of(bar.timestamp, self.server_offset_sec),
+        }
         ml_prob = self.ml_labeler.predict_win_probability(feat_vec)
         dl_align = dl_pred.prob_up if best_sig.side == Side.BUY else dl_pred.prob_down
         lat_ms = round((time.perf_counter() - t0) * 1000.0, 2)
@@ -605,8 +643,19 @@ class TradingOrchestrator:
             # Every risk-approved setup, before (and regardless of) the supervisor's verdict.
             await self._open_paper_position(
                 sym, best_sig, risk_dec, assess, spec, ml_prob, dl_align, spread_pts,
-                books=("raw",), veto="PENDING" if reviewed else "NONE",
+                books=("raw",), veto="PENDING" if reviewed else "NONE", context=entry_ctx,
             )
+        # Direction and session filters: after the No Veto book, so it keeps seeing every setup.
+        block = self._entry_filter(entry_ctx)
+        if block.code:
+            self.active_thought = f"{sym} {best_sig.strategy_id} {best_sig.side.value} filtered: {block.detail}"
+            await self._log_decision(
+                DecisionEvent(
+                    symbol=sym, category="BLOCK", tag=block.code.replace("_", " "), strategy_id=best_sig.strategy_id,
+                    side=best_sig.side.value, message=block.detail, latency_ms=lat_ms,
+                )
+            )
+            return
         if reviewed:
             if sym in self._supervising:
                 return
@@ -800,9 +849,10 @@ class TradingOrchestrator:
     async def _open_paper_position(
         self, sym: str, sig: Any, risk_dec: Any, assess: Any, spec: SymbolSpec,
         ml_prob: float, dl_align: float, spread_pts: float,
-        books: tuple[str, ...] = VETOED_BOOKS, veto: str = "",
+        books: tuple[str, ...] = VETOED_BOOKS, veto: str = "", context: dict[str, Any] | None = None,
     ) -> None:
         """Fill a trade virtually at bid/ask in the given paper books (one position per symbol)."""
+        ctx = context or {}
         tick = self.ticks.get(sym)
         if tick is None or risk_dec.volume <= 0:
             return
@@ -840,6 +890,9 @@ class TradingOrchestrator:
                 volume=p_vol,
                 veto=veto if name == "raw" else "",
                 time_stop_bars=p_ts,
+                htf_m15=int(ctx.get("htf_m15", 0)),
+                htf_h1=int(ctx.get("htf_h1", 0)),
+                session=str(ctx.get("session", "")),
             )
             opened = True
         if "raw" in books and h.own_stop and h.adaptive:
@@ -1085,6 +1138,9 @@ class TradingOrchestrator:
             dl_aligned=p.dl_conf >= 0.5,
             last_action=RLExitAction.MOVE_BE if moved_to_be else RLExitAction.HOLD,
         )
+        if p.session:
+            self.filter_learner.record(p.htf_m15, p.htf_h1, p.session, r)
+            await self.db.set_kv("filter_stats", self.filter_learner.to_dict(), utc_now_ms())
         key = p.veto if p.veto in VETO_KEYS else "NONE"
         st = self.veto_stats.setdefault(key, {"n": 0, "wins": 0, "sum_r": 0.0, "sum_money": 0.0})
         st["n"] += 1
@@ -1095,6 +1151,42 @@ class TradingOrchestrator:
         await self.db.set_kv("bandit_state", self.bandit.to_dict(), now_ms)
         await self.db.set_kv("rl_exit_state", self.rl_exit.to_dict(), now_ms)
         await self.db.set_kv("veto_stats", self.veto_stats, now_ms)
+
+    def _entry_filter(self, ctx: dict[str, Any]):
+        f = self.config.filters
+        self.filter_learner.min_samples = f.min_samples
+        session_mode = "on" if self.config.shields.preferred_sessions_only and f.session_mode == "off" else f.session_mode
+        return decide(
+            self.filter_learner, htf_mode=f.htf_mode, htf_timeframe=f.htf_timeframe, session_mode=session_mode,
+            blocked_sessions=f.blocked_sessions, m15=ctx["htf_m15"], h1=ctx["htf_h1"], session=ctx["session"],
+        )
+
+    def filters_view(self) -> dict[str, Any]:
+        f = self.config.filters
+        self.filter_learner.min_samples = f.min_samples
+        now_ts = int(utc_now_ms() // 1000)
+        upcoming = []
+        for ev in self.shields.news_events():
+            try:
+                ts = int(datetime.fromisoformat(str(ev["timestamp_utc"]).replace("Z", "+00:00")).timestamp())
+            except (KeyError, ValueError):
+                continue
+            if -3600 <= ts - now_ts <= 36 * 3600:
+                upcoming.append({"title": ev.get("title", ""), "time_utc": ts})
+        upcoming.sort(key=lambda e: e["time_utc"])
+        return {
+            "settings": f.model_dump(),
+            "news": {
+                "enabled": self.config.shields.news_blackout_enabled,
+                "buffer_minutes": self.config.shields.news_buffer_minutes,
+                "from_mt5": bool(self.shields.live_news_updated_ts),
+                "mt5_updated_ts": self.shields.live_news_updated_ts,
+                "upcoming": upcoming[:12],
+            },
+            "htf": {tf: self.filter_learner.table(f"htf:{tf}", HTF_BUCKETS) for tf in ("M15", "H1", "BOTH")},
+            "session": self.filter_learner.table("session", SESSIONS),
+            "server_offset_sec": self.server_offset_sec,
+        }
 
     def veto_scoreboard(self) -> list[dict[str, Any]]:
         rows = []
@@ -1316,6 +1408,7 @@ class TradingOrchestrator:
         spread_pts: float,
         spec: SymbolSpec,
         now_sec: int,
+        htf: tuple[int, int] = (0, 0),
     ) -> None:
         if sym in self.shadow_positions:
             return
@@ -1328,7 +1421,7 @@ class TradingOrchestrator:
         spread_px = spread_pts * spec.point
         if (spread_px / max(snap.atr14, 1e-9)) > shadow_cfg.risk.max_spread_atr_ratio:
             return
-        feat = extract_meta_features(best, snap, spread_px, dl_pred, bars[-1].timestamp)
+        feat = extract_meta_features(best, snap, spread_px, dl_pred, bars[-1].timestamp, htf=htf, server_offset_sec=self.server_offset_sec)
         ml_p = self.ml_labeler.predict_win_probability(feat)
         if ml_p < shadow_cfg.ai.ml_min_probability:
             return
@@ -1425,6 +1518,7 @@ class TradingOrchestrator:
         return out
 
     async def run_evolution_cycle(self) -> dict[str, Any]:
+        self.optimizer.backtester.server_offset_sec = self.server_offset_sec
         """Full 4-Stage Self-Improvement Cycle: Reflection -> Purged WFO + DL/ML Retrain -> Monte Carlo -> Shadow Gate."""
         if self.evolution_running:
             return {"status": "already_running"}

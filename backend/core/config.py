@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field
@@ -60,7 +60,7 @@ class ShieldsConfig(BaseModel):
     shock_cooldown_minutes: int = 10
     friday_flatten_enabled: bool = True
     friday_flatten_utc: str = "20:45"
-    preferred_sessions_only: bool = False
+    preferred_sessions_only: bool = False  # legacy: true = session filter "on" (see FiltersConfig)
 
 
 class AIConfig(BaseModel):
@@ -154,6 +154,19 @@ class PaperConfig(BaseModel):
     slippage_points: float | None = None  # per fill, against you, on entry and on exit
 
 
+class FiltersConfig(BaseModel):
+    """Direction and session filters (see backend/engine/filters.py).
+
+    "off" never blocks, "on" always blocks, "auto" blocks only after the No Veto paper book
+    shows those setups do clearly worse than the rest."""
+
+    htf_mode: Literal["off", "on", "auto"] = "auto"
+    htf_timeframe: Literal["M15", "H1", "BOTH"] = "H1"
+    session_mode: Literal["off", "on", "auto"] = "auto"
+    blocked_sessions: list[str] = Field(default_factory=lambda: ["asia", "late"])  # used by "on"
+    min_samples: int = 30
+
+
 class TradingConfig(BaseModel):
     app: AppConfig = Field(default_factory=AppConfig)
     instruments: InstrumentsConfig = Field(default_factory=InstrumentsConfig)
@@ -165,6 +178,7 @@ class TradingConfig(BaseModel):
     supervisor: SupervisorConfig = Field(default_factory=SupervisorConfig)
     exits: ExitConfig = Field(default_factory=ExitConfig)
     paper: PaperConfig = Field(default_factory=PaperConfig)
+    filters: FiltersConfig = Field(default_factory=FiltersConfig)
 
 
 class EnvSettings(BaseSettings):

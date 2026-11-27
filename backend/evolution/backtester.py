@@ -16,6 +16,7 @@ from backend.core.models import (
 from backend.evolution.meta_labeler import CalibratedMetaLabeler
 from backend.evolution.sequence_net import SequenceConvNet
 from backend.features.dataset import build_sequence_tensor, extract_meta_features
+from backend.features.htf import htf_bias_series
 from backend.features.regime import classify_regime
 from backend.risk.manager import DEFAULT_SPECS
 from backend.strategies.registry import StrategySuite
@@ -40,6 +41,7 @@ class CausalBacktester:
     ) -> None:
         self.slippage_points = slippage_points
         self.initial_equity = initial_equity
+        self.server_offset_sec = 0  # broker server time minus UTC, for the session features
 
     def run(
         self,
@@ -68,6 +70,9 @@ class CausalBacktester:
             if len(bars) < 60:
                 continue
             spec = sym_specs.get(symbol, DEFAULT_SPECS["XAUUSD"])
+            # Higher-timeframe direction known at each bar (completed M15/H1 bars only).
+            m15_bias = htf_bias_series(bars, 15)
+            h1_bias = htf_bias_series(bars, 60)
             i = 48
             while i < len(bars) - 2:
                 # Indicators only look back a few hundred bars (the live engine keeps 600), so a
@@ -94,7 +99,10 @@ class CausalBacktester:
                 # Causal DL inference
                 seq = build_sequence_tensor(window, seq_len=config.ai.dl_seq_len, point=spec.point)
                 dl_pred = dl_net.predict(seq) if (dl_net is not None and dl_net.trained) else DLPrediction()
-                feat_vec = extract_meta_features(best_sig, assess.indicators, spread_price, dl_pred, bars[i].timestamp)
+                feat_vec = extract_meta_features(
+                    best_sig, assess.indicators, spread_price, dl_pred, bars[i].timestamp,
+                    htf=(m15_bias[i], h1_bias[i]), server_offset_sec=self.server_offset_sec,
+                )
 
                 # ML Meta-Labeler filter (skip filtering if collecting raw training data)
                 ml_prob = ml_labeler.predict_win_probability(feat_vec) if (ml_labeler and ml_labeler.trained) else 0.62

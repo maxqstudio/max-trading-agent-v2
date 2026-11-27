@@ -105,6 +105,7 @@ export const api = {
   getSetup: () => req<any>('/api/setup'),
   getPaperCompare: () => req<any>('/api/paper/compare'),
   saveCosts: (body: Record<string, unknown>) => req<any>('/api/setup/costs', { method: 'PUT', body: JSON.stringify(body) }),
+  saveFilters: (body: Record<string, unknown>) => req<any>('/api/setup/filters', { method: 'PUT', body: JSON.stringify(body) }),
   saveExits: (body: Record<string, unknown>) => req<any>('/api/setup/exits', { method: 'PUT', body: JSON.stringify(body) }),
   saveLlmSetup: (body: Record<string, unknown>) => req<any>('/api/setup/llm', { method: 'PUT', body: JSON.stringify(body) }),
   listModels: (provider: string, api_key = '', base_url = '') =>
