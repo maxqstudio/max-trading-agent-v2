@@ -14,7 +14,8 @@ from backend.llm.presets import PRESETS
 
 _PROVIDER_FIELDS = ("API_KEY", "MODEL", "FAST_MODEL", "BASE_URL", "FALLBACK_MODELS")
 WRITABLE_KEYS: frozenset[str] = frozenset(
-    {"LLM_PROVIDER_CHAIN"} | {f"{n.upper()}_{f}" for n in PRESETS for f in _PROVIDER_FIELDS}
+    {"LLM_PROVIDER_CHAIN", "LLM_MAIN_CHAIN", "LLM_FAST_CHAIN"}
+    | {f"{n.upper()}_{f}" for n in PRESETS for f in _PROVIDER_FIELDS}
 )
 NEVER_WRITABLE: frozenset[str] = frozenset(
     {"ALLOW_LIVE_TRADING", "BRIDGE_AUTH_TOKEN", "CONTROL_API_TOKEN", "TELEGRAM_BOT_TOKEN"}
@@ -30,7 +31,7 @@ def validate_updates(updates: dict[str, str | None]) -> None:
     for key, value in updates.items():
         if key in NEVER_WRITABLE or key not in WRITABLE_KEYS:
             raise EnvWriteError(f"{key} cannot be changed from the dashboard")
-        if value is not None and (_BAD_VALUE.search(value) or len(value) > 500):
+        if value is not None and (_BAD_VALUE.search(value) or len(value) > 1000):
             raise EnvWriteError(f"{key}: invalid characters or too long")
 
 

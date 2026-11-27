@@ -228,3 +228,28 @@ def test_filters_setup_api(client):
     assert orch.shields.config.news_blackout_enabled is False  # live shields see the change
     assert c.put("/api/setup/filters", json={"htf_mode": "maybe"}).status_code == 422
     assert c.put("/api/setup/filters", json={"blocked_sessions": ["mars"]}).status_code == 422
+
+
+def test_put_setup_llm_saves_cross_provider_main_and_fast_chains(client):
+    c, env_path, orch = client
+    r = c.put(
+        "/api/setup/llm",
+        json={
+            "chain": ["openai", "gemini"],
+            "main_chain": ["openai:gpt-6-luna", "gemini:gemini-2.5-pro"],
+            "fast_chain": ["gemini:gemini-3.5-flash-lite", "openai:gpt-5-mini"],
+            "providers": {
+                "openai": {"api_key": "sk-test-openai-12345678"},
+                "gemini": {"api_key": "AIza-test-gemini-12345678"},
+            },
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["llm"]["main_chain"] == ["openai:gpt-6-luna", "gemini:gemini-2.5-pro"]
+    assert body["llm"]["fast_chain"] == ["gemini:gemini-3.5-flash-lite", "openai:gpt-5-mini"]
+    env_text = env_path.read_text(encoding="utf-8")
+    assert "LLM_MAIN_CHAIN=openai:gpt-6-luna,gemini:gemini-2.5-pro" in env_text
+    assert "LLM_FAST_CHAIN=gemini:gemini-3.5-flash-lite,openai:gpt-5-mini" in env_text
+    assert [(p.name, p.model) for p in orch.llm.active_main] == [("openai", "gpt-6-luna"), ("gemini", "gemini-2.5-pro")]
+    assert [(p.name, p.fast_model) for p in orch.llm.active_fast] == [("gemini", "gemini-3.5-flash-lite"), ("openai", "gpt-5-mini")]
