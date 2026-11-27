@@ -170,8 +170,6 @@ def test_paper_normal_book_steps_its_stop_at_a_stage(tmp_path):
     import asyncio
 
     from backend.core.models import TickSnapshot, utc_now_ms
-    from tests.test_filters import _orch
-
     orch, db = _orch(tmp_path)
 
     async def run():
@@ -199,3 +197,19 @@ def test_paper_normal_book_steps_its_stop_at_a_stage(tmp_path):
 
     p = asyncio.run(run())
     assert p.sl >= p.entry_price
+
+
+def _orch(tmp_path):
+    from backend.core.config import EnvSettings, load_trading_config
+    from backend.engine.orchestrator import TradingOrchestrator
+    from backend.llm.router import LLMRouter
+    from backend.storage.database import Database
+
+    cfg = load_trading_config(local_path=None)
+    cfg.app.database_path = str(tmp_path / "s.db")
+    cfg.app.snapshots_dir = str(tmp_path / "snap")
+    cfg.app.kill_switch_path = str(tmp_path / "k.json")
+    cfg.shields.news_file = str(tmp_path / "none.json")
+    env = EnvSettings(bridge_auth_token="b" * 32, control_api_token="c" * 32, _env_file=None)
+    db = Database(cfg.app.database_path)
+    return TradingOrchestrator(cfg, env, db, llm_router=LLMRouter(resolved=[])), db
