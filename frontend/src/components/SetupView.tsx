@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { ArrowDown, ArrowUp, Check, Loader2, Plus, RefreshCw, Trash2, X } from 'lucide-react';
 import { api } from '../api/client';
+import { BrokerCostsCard } from './BrokerCostsCard';
 
 // Setup page: AI providers (order, key, model from the provider's list, fallback models),
 // Claude supervisor settings, MT5 and safety info. Keys are written to the local .env only
@@ -390,6 +391,9 @@ export const SetupView: React.FC<{ onToast: (msg: string) => void }> = ({ onToas
               Nama pasar (mis. XAUUSD.m) dideteksi otomatis oleh EA. EA dipasang & di-compile otomatis oleh start_all.bat.
             </p>
           </div>
+          {setup.costs && (
+            <BrokerCostsCard costs={setup.costs} onSaved={(c) => setSetup({ ...setup, costs: c })} onToast={onToast} />
+          )}
           <div className="cockpit-card rounded-lg p-3.5 space-y-2">
             <h3 className="font-bold uppercase tracking-wider">Keamanan</h3>
             <Row k="Mode sekarang" v={setup.safety.trading_mode} />

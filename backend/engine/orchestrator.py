@@ -189,6 +189,7 @@ class TradingOrchestrator:
         # "normal" = existing exits + profit lock, "hitrun" = take profit fast.
         self.exit_selector = ExitStyleSelector(min_samples=config.exits.adaptive_min_samples)
         self.veto_stats: dict[str, dict[str, float]] = {}
+        self.learned_costs: dict[str, dict[str, float]] = {}  # per symbol, from closed MT5 trades
         self.paper_books: dict[str, PaperBook] = {
             k: PaperBook(equity=config.paper.start_equity) for k in PAPER_BOOKS
         }
@@ -254,6 +255,7 @@ class TradingOrchestrator:
                     book.positions[p.symbol] = p
         await self._rebuild_exit_selector()
         self.veto_stats = await self.db.get_kv("veto_stats") or {}
+        await self._learn_broker_costs()
         self.order_sm.import_tracking(await self.db.get_kv("mt5_tracking"))
         self._tracking_sig = tuple(sorted(self.order_sm.active_positions))
 
@@ -372,6 +374,8 @@ class TradingOrchestrator:
             await self.db.set_kv("mt5_tracking", self.order_sm.export_tracking(), now_ms)
 
         # 3. Online learning on every newly closed live trade (RL-1 Bandit + RL-2 Exit + Rollback Guard)
+        if closed_trades:
+            await self._learn_broker_costs(closed_trades)
         for tr in closed_trades:
             await self.db.save_trade(tr)
             self._recent_closed.append(tr)
@@ -781,7 +785,8 @@ class TradingOrchestrator:
         tick = self.ticks.get(sym)
         if tick is None or risk_dec.volume <= 0:
             return
-        entry = tick.ask if sig.side == Side.BUY else tick.bid
+        slip = self.paper_costs(sym)["slippage_points"] * spec.point
+        entry = (tick.ask + slip) if sig.side == Side.BUY else (tick.bid - slip)
         sl, tp = risk_dec.adjusted_sl, risk_dec.adjusted_tp
         opened = False
         for name in books:
@@ -829,11 +834,65 @@ class TradingOrchestrator:
             return "normal"
         return self.exit_selector.choose(symbol, regime.value).style
 
+    async def _learn_broker_costs(self, new_trades: list[TradeRecord] | None = None) -> None:
+        """Commission per lot and slippage per symbol, from the last closed MT5 trades.
+
+        MT5 reports the entry deal's commission; the exit side usually costs the same, so the
+        round trip is taken as twice the entry commission."""
+        trades = await self.db.list_trades(limit=2000, is_shadow=False, exclude_version_prefix="PAPER")
+        if new_trades:
+            seen = {t.trade_id for t in trades}
+            trades += [t for t in new_trades if t.trade_id not in seen]
+        by_sym: dict[str, list[TradeRecord]] = {}
+        for t in sorted(trades, key=lambda t: t.close_time):
+            if t.volume > 0:
+                by_sym.setdefault(t.symbol, []).append(t)
+        out: dict[str, dict[str, float]] = {}
+        for sym, ts in by_sym.items():
+            last = ts[-30:]
+            comm = sorted(abs(t.commission) * 2 / t.volume for t in last)
+            slip = sorted(abs(t.slippage_points) for t in last)
+            out[sym] = {
+                "commission_per_lot": round(comm[len(comm) // 2], 2),
+                "slippage_points": round(slip[len(slip) // 2], 1),
+                "trades": float(len(last)),
+            }
+        self.learned_costs = out
+
+    def paper_costs(self, symbol: str) -> dict[str, Any]:
+        """Costs used for paper trades on ``symbol``, and where each number comes from."""
+        p = self.config.paper
+        learned = self.learned_costs.get(symbol)
+        spec = self.specs.get(symbol)
+        if p.commission_per_lot is not None:
+            comm, comm_src = p.commission_per_lot, "manual"
+        elif learned:
+            comm, comm_src = learned["commission_per_lot"], "mt5"
+        else:
+            comm, comm_src = (spec.commission_per_lot if spec else 0.0), "default"
+        if p.slippage_points is not None:
+            slip, slip_src = p.slippage_points, "manual"
+        elif learned:
+            slip, slip_src = learned["slippage_points"], "mt5"
+        else:
+            slip, slip_src = 0.0, "default"
+        return {
+            "symbol": symbol,
+            "commission_per_lot": float(comm),
+            "commission_source": comm_src,
+            "slippage_points": float(slip),
+            "slippage_source": slip_src,
+            "mt5_trades": int(learned["trades"]) if learned else 0,
+        }
+
+    def _paper_exit_px(self, p: ShadowPosition, px: float) -> float:
+        spec = self.specs.get(p.symbol)
+        slip = self.paper_costs(p.symbol)["slippage_points"] * (spec.point if spec else 0.0)
+        return px - slip if p.side == Side.BUY else px + slip
+
     def _net_take(self, symbol: str) -> NetTake:
         h = self.config.paper.hit_run
-        spec = self.specs.get(symbol)
-        comm = h.commission_per_lot if h.commission_per_lot is not None else (spec.commission_per_lot if spec else 0.0)
-        return NetTake(min_net_profit=h.min_net_profit, commission_per_lot=comm)
+        return NetTake(min_net_profit=h.min_net_profit, commission_per_lot=self.paper_costs(symbol)["commission_per_lot"])
 
     def _exit_policy(self) -> ProfitLock:
         e = self.config.exits
@@ -854,7 +913,7 @@ class TradingOrchestrator:
             spread_px = (tk.ask - tk.bid) if tk.ask > tk.bid else (tk.spread_points * (spec.point if spec else 0.0))
             if name == "hitrun":
                 # Hit & Run: take any net profit. Valued at bid/ask, so spread is already paid.
-                take, _net = net_take(self._net_take(p.symbol), gross_money=self._paper_money(p, px), volume=p.volume)
+                take, _net = net_take(self._net_take(p.symbol), gross_money=self._paper_money(p, self._paper_exit_px(p, px)), volume=p.volume)
                 action, new_sl = ("CLOSE" if take else "HOLD"), p.sl
             else:
                 action, new_sl = evaluate(
@@ -872,7 +931,8 @@ class TradingOrchestrator:
             book.positions.pop(tk.symbol, None)
             changed = True
             # Both books pay the same round-trip commission so the comparison is fair.
-            pnl = round(self._paper_money(p, px) - self._net_take(p.symbol).commission_per_lot * p.volume, 2)
+            exit_px = self._paper_exit_px(p, px)
+            pnl = round(self._paper_money(p, exit_px) - self._net_take(p.symbol).commission_per_lot * p.volume, 2)
             book.equity = round(book.equity + pnl, 2)
             self.exit_selector.record(name, p.symbol, p.regime.value, round(cur_r, 4))
             if name == "raw":
@@ -892,12 +952,14 @@ class TradingOrchestrator:
                     side=p.side,
                     volume=p.volume,
                     entry_price=p.entry_price,
-                    exit_price=px,
+                    exit_price=round(exit_px, spec.digits if spec else 5),
                     sl_price=p.sl,
                     tp_price=p.tp,
                     open_time=p.open_time,
                     close_time=now_sec,
                     pnl_money=pnl,
+                    commission=-round(self._net_take(p.symbol).commission_per_lot * p.volume, 2),
+                    slippage_points=self.paper_costs(p.symbol)["slippage_points"],
                     pnl_r=round(cur_r, 4),
                     mae_r=round(p.mae_r, 4),
                     mfe_r=round(p.mfe_r, 4),

@@ -66,8 +66,13 @@ class ExitSetupRequest(BaseModel):
     trail_start_r: float | None = Field(default=None, ge=0.2, le=5.0)
     trail_dist_r: float | None = Field(default=None, ge=0.05, le=3.0)
     hit_min_net_profit: float | None = Field(default=None, ge=0.0, le=100.0)
-    hit_commission_per_lot: float | None = Field(default=None, ge=0.0, le=100.0)
     adaptive: bool | None = None
+
+
+class CostSetupRequest(BaseModel):
+    # null = automatic (learned from closed MT5 trades, symbol default until then)
+    commission_per_lot: float | None = Field(default=None, ge=0.0, le=200.0)
+    slippage_points: float | None = Field(default=None, ge=0.0, le=500.0)
 
 
 def _mask(key: str) -> str:
@@ -130,6 +135,13 @@ def register_setup_routes(api: APIRouter, orch: TradingOrchestrator, env_path: s
             "account_currency": orch.account.currency,
         }
 
+    def costs_view() -> dict[str, Any]:
+        p = orch.config.paper
+        return {
+            "manual": {"commission_per_lot": p.commission_per_lot, "slippage_points": p.slippage_points},
+            "symbols": [orch.paper_costs(s) for s in orch.config.instruments.symbols],
+        }
+
     def safety_view() -> dict[str, Any]:
         return {
             "trading_mode": orch.config.app.trading_mode.value,
@@ -140,7 +152,15 @@ def register_setup_routes(api: APIRouter, orch: TradingOrchestrator, env_path: s
 
     @api.get("/setup")
     async def get_setup() -> dict[str, Any]:
-        return {"llm": llm_view(), "supervisor": supervisor_view(), "mt5": mt5_view(), "safety": safety_view()}
+        return {"llm": llm_view(), "supervisor": supervisor_view(), "mt5": mt5_view(), "safety": safety_view(), "costs": costs_view()}
+
+    @api.put("/setup/costs")
+    async def put_costs(req: CostSetupRequest) -> dict[str, Any]:
+        orch.config.paper = orch.config.paper.model_copy(
+            update={"commission_per_lot": req.commission_per_lot, "slippage_points": req.slippage_points}
+        )
+        save_local_config("paper", orch.config.paper.model_dump())
+        return costs_view()
 
     @api.put("/setup/llm")
     async def put_llm(req: LLMSetupRequest) -> dict[str, Any]:
@@ -225,7 +245,7 @@ def register_setup_routes(api: APIRouter, orch: TradingOrchestrator, env_path: s
             if v is not None
         })
         hr = orch.config.paper.hit_run.model_copy(update={
-            k: v for k, v in {"min_net_profit": req.hit_min_net_profit, "commission_per_lot": req.hit_commission_per_lot}.items()
+            k: v for k, v in {"min_net_profit": req.hit_min_net_profit}.items()
             if v is not None
         })
         orch.config.exits = ex

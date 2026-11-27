@@ -130,9 +130,6 @@ class HitRunConfig(BaseModel):
     # Close as soon as the net profit (after spread, commission, swap) is at least this much
     # money per trade. $1 also leaves room for slippage on the close.
     min_net_profit: float = 1.0
-    # Round-trip commission per lot for paper trades and when MT5 has not reported one.
-    # None = use the symbol's commission_per_lot.
-    commission_per_lot: float | None = None
 
 
 class PaperConfig(BaseModel):
@@ -142,6 +139,10 @@ class PaperConfig(BaseModel):
     start_equity: float = 10000.0
     max_hold_min: int = 240
     hit_run: HitRunConfig = Field(default_factory=HitRunConfig)
+    # Broker costs for paper trades. None = automatic: learned from your closed MT5 trades,
+    # or the symbol default until there are any. A number = manual override for every symbol.
+    commission_per_lot: float | None = None  # round trip, account currency per 1.0 lot
+    slippage_points: float | None = None  # per fill, against you, on entry and on exit
 
 
 class TradingConfig(BaseModel):
