@@ -257,6 +257,7 @@ export default function App() {
               <div className="flex justify-between"><span className="text-[#8A9BB5]">AI Scans</span><span className="mono font-bold">{state?.scans_count ?? 0}</span></div>
               <div className="flex justify-between"><span className="text-[#8A9BB5]">Paper Normal</span><span className="mono font-bold text-[#F59E0B]">${(state?.paper?.books?.normal?.equity ?? state?.paper?.equity ?? 10000).toFixed(0)}</span></div>
               <div className="flex justify-between"><span className="text-[#8A9BB5]">Paper Hit &amp; Run</span><span className="mono font-bold text-[#EC4899]">${(state?.paper?.books?.hitrun?.equity ?? 10000).toFixed(0)}</span></div>
+              <div className="flex justify-between" title="Semua setup yang lolos risk, termasuk yang ditolak Claude"><span className="text-[#8A9BB5]">Paper Tanpa Veto</span><span className="mono font-bold text-[#14B8A6]">${(state?.paper?.books?.raw?.equity ?? 10000).toFixed(0)}</span></div>
               <div className="flex justify-between" title="Versi strategi hasil evolusi yang sedang diuji di samping (challenger)"><span className="text-[#8A9BB5]">Kandidat (Evolusi)</span><span className="mono font-bold text-[#8B5CF6]">${(state?.shadow_equity ?? 10000).toFixed(0)}</span></div>
             </div>
           </div>
@@ -361,7 +362,7 @@ export default function App() {
                       <tbody className="divide-y divide-[#1F2D45]">
                         {paperPositions.map((p) => (
                           <tr key={`paper-${p.book ?? 'normal'}-${p.symbol}`}>
-                            <td className="py-2 px-2"><div className="mono font-bold">{p.symbol} <span className={`px-1 rounded text-[10px] ${p.book === 'hitrun' ? 'bg-[#EC4899]/15 text-[#EC4899]' : 'bg-[#F59E0B]/15 text-[#F59E0B]'}`}>{p.book === 'hitrun' ? 'HIT&RUN' : 'NORMAL'}</span></div><div className="text-[#8A9BB5]">{p.strategy_id}</div></td>
+                            <td className="py-2 px-2"><div className="mono font-bold">{p.symbol} <span className={`px-1 rounded text-[10px] ${p.book === 'hitrun' ? 'bg-[#EC4899]/15 text-[#EC4899]' : p.book === 'raw' ? 'bg-[#14B8A6]/15 text-[#14B8A6]' : 'bg-[#F59E0B]/15 text-[#F59E0B]'}`}>{p.book === 'hitrun' ? 'HIT&RUN' : p.book === 'raw' ? 'TANPA VETO' : 'NORMAL'}</span></div><div className="text-[#8A9BB5]">{p.strategy_id}</div></td>
                             <td className="py-2 px-2 mono"><span className={`px-1.5 py-0.5 rounded font-bold ${p.side === 'BUY' ? 'bg-[#10B981]/15 text-[#10B981]' : 'bg-[#EF4444]/15 text-[#EF4444]'}`}>{p.side}</span> {p.volume}</td>
                             <td className="py-2 px-2 mono">{p.entry_price} → <b>{p.current_price}</b></td>
                             <td className={`py-2 px-2 mono font-bold ${p.profit >= 0 ? 'text-[#10B981]' : 'text-[#EF4444]'}`}>{p.profit >= 0 ? '+' : ''}${p.profit.toFixed(2)}</td>

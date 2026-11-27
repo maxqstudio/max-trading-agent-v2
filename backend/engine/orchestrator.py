@@ -66,12 +66,18 @@ class ShadowPosition:
     mfe_r: float = 0.0
     version_id: str = "shadow"
     volume: float = 0.10
+    veto: str = ""  # Tanpa Veto book: what the supervisor said about this setup (evaluation only)
 
 
 PAPER_VERSION = "PAPER"  # Normal book (kept for journal compatibility)
 HITRUN_VERSION = "PAPER-HITRUN"
-PAPER_BOOKS: dict[str, str] = {"normal": PAPER_VERSION, "hitrun": HITRUN_VERSION}
-PAPER_LABELS: dict[str, str] = {"normal": "Normal", "hitrun": "Hit & Run"}
+RAW_VERSION = "PAPER-RAW"
+PAPER_BOOKS: dict[str, str] = {"normal": PAPER_VERSION, "hitrun": HITRUN_VERSION, "raw": RAW_VERSION}
+PAPER_LABELS: dict[str, str] = {"normal": "Normal", "hitrun": "Hit & Run", "raw": "Tanpa Veto"}
+# Normal and Hit & Run open only what the supervisor allowed. "raw" opens every setup that
+# passed the risk checks, so the bandit and RL exit learn from all setups, not only approved ones.
+VETOED_BOOKS = ("normal", "hitrun")
+VETO_KEYS = ("APPROVE", "REDUCE", "REJECT", "NONE")
 PAPER_START_EQUITY = 10000.0
 
 
@@ -182,6 +188,7 @@ class TradingOrchestrator:
         # Paper books run side by side on the same approved setups, in every mode:
         # "normal" = existing exits + profit lock, "hitrun" = take profit fast.
         self.exit_selector = ExitStyleSelector(min_samples=config.exits.adaptive_min_samples)
+        self.veto_stats: dict[str, dict[str, float]] = {}
         self.paper_books: dict[str, PaperBook] = {
             k: PaperBook(equity=config.paper.start_equity) for k in PAPER_BOOKS
         }
@@ -246,6 +253,7 @@ class TradingOrchestrator:
                 if p:
                     book.positions[p.symbol] = p
         await self._rebuild_exit_selector()
+        self.veto_stats = await self.db.get_kv("veto_stats") or {}
         self.order_sm.import_tracking(await self.db.get_kv("mt5_tracking"))
         self._tracking_sig = tuple(sorted(self.order_sm.active_positions))
 
@@ -367,18 +375,21 @@ class TradingOrchestrator:
         for tr in closed_trades:
             await self.db.save_trade(tr)
             self._recent_closed.append(tr)
-            self.bandit.update(tr.symbol, tr.regime, tr.strategy_id, tr.pnl_r)
             self.risk.record_trade_outcome(tr.pnl_money, now_sec)
-            self.rl_exit.update_from_closed_trade(
-                peak_r=tr.mfe_r,
-                realized_r=tr.pnl_r,
-                bars_held=max(1, (tr.close_time - tr.open_time) // 60),
-                regime=tr.regime,
-                dl_aligned=tr.dl_confidence >= 0.5,
-                last_action=RLExitAction.MOVE_BE if "MOVE_BE" in tr.rl_exit_trace else RLExitAction.HOLD,
-            )
-            await self.db.set_kv("bandit_state", self.bandit.to_dict(), now_ms)
-            await self.db.set_kv("rl_exit_state", self.rl_exit.to_dict(), now_ms)
+            # With paper on, the bandit and RL exit learn from the "Tanpa Veto" book instead, which
+            # sees every setup (MT5 only sees what the supervisor approved, and would double count).
+            if not self.config.paper.enabled:
+                self.bandit.update(tr.symbol, tr.regime, tr.strategy_id, tr.pnl_r)
+                self.rl_exit.update_from_closed_trade(
+                    peak_r=tr.mfe_r,
+                    realized_r=tr.pnl_r,
+                    bars_held=max(1, (tr.close_time - tr.open_time) // 60),
+                    regime=tr.regime,
+                    dl_aligned=tr.dl_confidence >= 0.5,
+                    last_action=RLExitAction.MOVE_BE if "MOVE_BE" in tr.rl_exit_trace else RLExitAction.HOLD,
+                )
+                await self.db.set_kv("bandit_state", self.bandit.to_dict(), now_ms)
+                await self.db.set_kv("rl_exit_state", self.rl_exit.to_dict(), now_ms)
             await self._log_decision(
                 DecisionEvent(
                     symbol=tr.symbol,
@@ -578,9 +589,16 @@ class TradingOrchestrator:
             )
             return
 
-        if self.supervisor.active and (
+        reviewed = self.supervisor.active and (
             self.config.app.trading_mode != TradingMode.SHADOW_ONLY or self.config.supervisor.review_in_shadow
-        ):
+        )
+        if self.config.paper.enabled and not (reviewed and sym in self._supervising):
+            # Every risk-approved setup, before (and regardless of) the supervisor's verdict.
+            await self._open_paper_position(
+                sym, best_sig, risk_dec, assess, spec, ml_prob, dl_align, spread_pts,
+                books=("raw",), veto="PENDING" if reviewed else "NONE",
+            )
+        if reviewed:
             if sym in self._supervising:
                 return
             self._supervising.add(sym)
@@ -622,6 +640,10 @@ class TradingOrchestrator:
             verdict = await self.supervisor.review(ctx)
             if self.supervisor.last:
                 self.supervisor.last["symbol"] = sym
+            raw = self.paper_books["raw"].positions.get(sym)
+            if raw is not None and raw.veto == "PENDING":
+                raw.veto = verdict.decision if not verdict.error else "NONE"
+                await self._save_paper()
             note = f" | Supervisor {verdict.decision} ({verdict.provider or 'policy'}, {verdict.latency_ms:.0f}ms): {verdict.reason}"
             if not verdict.allows_entry:
                 await self._log_decision(
@@ -674,7 +696,7 @@ class TradingOrchestrator:
     ) -> None:
         tick = self.ticks.get(sym)
         if self.config.paper.enabled:
-            await self._open_paper_position(sym, best_sig, risk_dec, assess, spec, ml_prob, dl_align, spread_pts)
+            await self._open_paper_position(sym, best_sig, risk_dec, assess, spec, ml_prob, dl_align, spread_pts, books=VETOED_BOOKS)
         # In SHADOW_ONLY mode, log & skip real MT5 dispatch
         if self.config.app.trading_mode == TradingMode.SHADOW_ONLY:
             await self._log_decision(
@@ -752,15 +774,17 @@ class TradingOrchestrator:
     async def _open_paper_position(
         self, sym: str, sig: Any, risk_dec: Any, assess: Any, spec: SymbolSpec,
         ml_prob: float, dl_align: float, spread_pts: float,
+        books: tuple[str, ...] = VETOED_BOOKS, veto: str = "",
     ) -> None:
-        """Fill an approved trade virtually at bid/ask in every paper book (one position per symbol)."""
+        """Fill a trade virtually at bid/ask in the given paper books (one position per symbol)."""
         tick = self.ticks.get(sym)
         if tick is None or risk_dec.volume <= 0:
             return
         entry = tick.ask if sig.side == Side.BUY else tick.bid
         sl, tp = risk_dec.adjusted_sl, risk_dec.adjusted_tp
         opened = False
-        for name, book in self.paper_books.items():
+        for name in books:
+            book = self.paper_books[name]
             if sym in book.positions:
                 continue
             book.positions[sym] = ShadowPosition(
@@ -778,6 +802,7 @@ class TradingOrchestrator:
                 spread_pts=spread_pts,
                 version_id=PAPER_BOOKS[name],
                 volume=risk_dec.volume,
+                veto=veto if name == "raw" else "",
             )
             opened = True
         if opened:
@@ -849,6 +874,8 @@ class TradingOrchestrator:
             pnl = round(self._paper_money(p, px) - self._net_take(p.symbol).commission_per_lot * p.volume, 2)
             book.equity = round(book.equity + pnl, 2)
             self.exit_selector.record(name, p.symbol, p.regime.value, round(cur_r, 4))
+            if name == "raw":
+                await self._learn_from_unvetoed(p, round(cur_r, 4), pnl, now_sec)
             in_profit_stop = hit_sl and cur_r > 0
             reason = (
                 "TP" if hit_tp else "TAKE" if action == "CLOSE" else "LOCK" if in_profit_stop
@@ -891,6 +918,42 @@ class TradingOrchestrator:
             )
         if changed:
             await self._save_paper()
+
+    async def _learn_from_unvetoed(self, p: ShadowPosition, r: float, pnl: float, now_sec: int) -> None:
+        """Online learning from a closed "Tanpa Veto" trade. The labels are market results only;
+        the supervisor's verdict is never a training target (it is only counted for the scoreboard)."""
+        self.bandit.update(p.symbol, p.regime, p.strategy_id, r)
+        moved_to_be = (p.sl >= p.entry_price) if p.side == Side.BUY else (0 < p.sl <= p.entry_price)
+        self.rl_exit.update_from_closed_trade(
+            peak_r=p.mfe_r,
+            realized_r=r,
+            bars_held=max(1, (now_sec - p.open_time) // 60),
+            regime=p.regime,
+            dl_aligned=p.dl_conf >= 0.5,
+            last_action=RLExitAction.MOVE_BE if moved_to_be else RLExitAction.HOLD,
+        )
+        key = p.veto if p.veto in VETO_KEYS else "NONE"
+        st = self.veto_stats.setdefault(key, {"n": 0, "wins": 0, "sum_r": 0.0, "sum_money": 0.0})
+        st["n"] += 1
+        st["wins"] += int(pnl > 0)
+        st["sum_r"] = round(st["sum_r"] + r, 4)
+        st["sum_money"] = round(st["sum_money"] + pnl, 2)
+        now_ms = utc_now_ms()
+        await self.db.set_kv("bandit_state", self.bandit.to_dict(), now_ms)
+        await self.db.set_kv("rl_exit_state", self.rl_exit.to_dict(), now_ms)
+        await self.db.set_kv("veto_stats", self.veto_stats, now_ms)
+
+    def veto_scoreboard(self) -> list[dict[str, Any]]:
+        rows = []
+        for k in VETO_KEYS:
+            st = self.veto_stats.get(k)
+            if not st or not st["n"]:
+                continue
+            rows.append({
+                "verdict": k, "trades": st["n"], "win_rate": round(st["wins"] / st["n"] * 100, 1),
+                "avg_r": round(st["sum_r"] / st["n"], 3), "net_pnl": st["sum_money"],
+            })
+        return rows
 
     def paper_snapshot(self) -> dict[str, Any]:
         books = {}

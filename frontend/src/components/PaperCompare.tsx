@@ -38,9 +38,16 @@ interface Compare {
   ai_cost_today_usd: number;
   note: string;
   learning: { adaptive: boolean; min_samples: number; groups: Group[] };
+  veto?: { verdict: string; trades: number; win_rate: number; avg_r: number; net_pnl: number }[];
 }
 
-const COLOR: Record<string, string> = { normal: '#F59E0B', hitrun: '#EC4899', mt5: '#3B82F6' };
+const COLOR: Record<string, string> = { normal: '#F59E0B', hitrun: '#EC4899', raw: '#14B8A6', mt5: '#3B82F6' };
+const VERDICT: Record<string, string> = {
+  APPROVE: 'Disetujui Claude',
+  REDUCE: 'Dikecilkan Claude',
+  REJECT: 'Ditolak Claude',
+  NONE: 'Tanpa review',
+};
 const money = (v: number) => `${v >= 0 ? '+' : '-'}$${Math.abs(v).toFixed(2)}`;
 const signed = (v: number, d = 2) => `${v >= 0 ? '+' : ''}${v.toFixed(d)}`;
 
@@ -75,7 +82,10 @@ export const PaperCompare: React.FC = () => {
     }
   };
 
-  const paper = data?.rows.filter((r) => r.book !== 'mt5') ?? [];
+  const paper = data?.rows.filter((r) => r.book === 'normal' || r.book === 'hitrun') ?? [];
+  const veto = data?.veto ?? [];
+  const rej = veto.find((v) => v.verdict === 'REJECT');
+  const ok = veto.find((v) => v.verdict === 'APPROVE');
   const best =
     paper.length === 2 && paper.every((r) => r.trades > 0) ? (paper[0].net_pnl >= paper[1].net_pnl ? paper[0].book : paper[1].book) : null;
   const groups = (data?.learning.groups ?? []).filter((g) => g.normal_n + g.hitrun_n > 0);
@@ -137,6 +147,51 @@ export const PaperCompare: React.FC = () => {
             ) : null}
           </tbody>
         </table>
+      </div>
+
+      <div className="px-3 py-2 border-t border-[#1F2D45] text-xs space-y-2">
+        <div className="font-bold flex items-center gap-1.5">
+          <Brain className="w-3.5 h-3.5 text-[#14B8A6]" /> Akurasi veto Claude (dari buku Tanpa Veto)
+        </div>
+        <p className="text-[#8A9BB5]">
+          Buku Tanpa Veto membuka semua setup yang lolos risk, termasuk yang ditolak Claude. Bandit dan RL exit belajar dari hasil pasar buku
+          ini, bukan dari keputusan Claude. Tabel ini hanya menilai: kalau setup yang ditolak hasilnya lebih jelek, veto-nya membantu.
+        </p>
+        {veto.length ? (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="border-b border-[#1F2D45] text-[#8A9BB5]">
+                  <th className="py-1 px-2">Keputusan</th>
+                  <th className="py-1 px-2 text-right">Trade</th>
+                  <th className="py-1 px-2 text-right">Win rate</th>
+                  <th className="py-1 px-2 text-right">Avg R</th>
+                  <th className="py-1 px-2 text-right">Net</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[#1F2D45] mono">
+                {veto.map((v) => (
+                  <tr key={v.verdict}>
+                    <td className="py-1 px-2 font-sans font-bold">{VERDICT[v.verdict] ?? v.verdict}</td>
+                    <td className="py-1 px-2 text-right">{v.trades}</td>
+                    <td className="py-1 px-2 text-right">{v.win_rate.toFixed(1)}%</td>
+                    <td className="py-1 px-2 text-right">{signed(v.avg_r)}</td>
+                    <td className={`py-1 px-2 text-right font-bold ${v.net_pnl >= 0 ? 'text-[#10B981]' : 'text-[#EF4444]'}`}>{money(v.net_pnl)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {rej && ok ? (
+              <p className="mt-1 font-bold" style={{ color: rej.avg_r < ok.avg_r ? '#10B981' : '#F59E0B' }}>
+                {rej.avg_r < ok.avg_r
+                  ? `Veto membantu: setup yang ditolak rata-rata ${signed(rej.avg_r)}R, yang disetujui ${signed(ok.avg_r)}R.`
+                  : `Veto belum terbukti membantu: setup yang ditolak rata-rata ${signed(rej.avg_r)}R, yang disetujui ${signed(ok.avg_r)}R.`}
+              </p>
+            ) : null}
+          </div>
+        ) : (
+          <p className="text-[#8A9BB5]">Belum ada trade Tanpa Veto yang selesai.</p>
+        )}
       </div>
 
       <div className="px-3 py-2 border-t border-[#1F2D45] text-xs space-y-2">
