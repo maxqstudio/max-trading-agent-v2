@@ -20,7 +20,7 @@ import { BrainView } from './components/BrainView';
 import { EvolutionView } from './components/EvolutionView';
 import { ForensicsView } from './components/ForensicsView';
 import { KillSwitchModal } from './components/KillSwitchModal';
-import { LiveCandleChart } from './components/LiveCandleChart';
+import { LiveCandleChart, toChartPosition } from './components/LiveCandleChart';
 import { LiveStatusStrip } from './components/LiveStatusStrip';
 import { PaperCompare } from './components/PaperCompare';
 import { ReportView } from './components/ReportView';
@@ -56,12 +56,19 @@ export default function App() {
 
   const symbols = state?.radar?.map((r) => r.symbol) || ['XAUUSD', 'EURUSD', 'GBPUSD', 'USDJPY'];
   const activeRadar = state?.radar?.find((r) => r.symbol === selectedSym) || state?.radar?.[0];
-  const activePosForChart = state?.positions?.find((p) => p.symbol === activeRadar?.symbol);
+  const activeMt5Pos = state?.positions?.find((p) => p.symbol === activeRadar?.symbol);
+  const paperPositions = state?.paper?.positions || [];
+  const activePaperPos =
+    state?.paper?.books?.normal?.positions?.find((p) => p.symbol === activeRadar?.symbol) ||
+    state?.paper?.books?.hitrun?.positions?.find((p) => p.symbol === activeRadar?.symbol) ||
+    state?.paper?.books?.raw?.positions?.find((p) => p.symbol === activeRadar?.symbol) ||
+    state?.paper?.books?.raw_hitrun?.positions?.find((p) => p.symbol === activeRadar?.symbol) ||
+    paperPositions.find((p) => p.symbol === activeRadar?.symbol);
+  const activePosForChart = toChartPosition(activeMt5Pos, activePaperPos);
   const eq = state?.account?.equity ?? 10000;
   const dayPnl = state?.account?.daily_pnl ?? 0;
   const ddPct = state?.account?.daily_dd_pct ?? 0;
   const staleBridge = state ? !state.bridge_connected : !wsConnected;
-  const paperPositions = state?.paper?.positions || [];
   const normalPaperPositions = state?.paper?.books?.normal?.positions || paperPositions.filter((p) => !p.book || p.book === 'normal');
   const hasMt5Positions = (state?.positions?.length || 0) > 0;
   const floatingTotal = hasMt5Positions
@@ -358,8 +365,6 @@ export default function App() {
                 </div>
               </div>
 
-              <PaperCompare />
-
               {/* Row 2: Live Positions & Cognitive Stream */}
               <div className="grid grid-cols-1 xl:grid-cols-12 gap-3">
                 <div className="xl:col-span-7 cockpit-card rounded-lg flex flex-col">
@@ -477,7 +482,12 @@ export default function App() {
           {tab === 'brain' && <BrainView symbols={symbols} />}
           {tab === 'evolution' && <EvolutionView onToast={showToast} />}
           {tab === 'research' && <ResearchView onToast={showToast} />}
-          {tab === 'report' && <ReportView onToast={showToast} />}
+          {tab === 'report' && (
+            <div className="space-y-3">
+              <ReportView onToast={showToast} />
+              <PaperCompare />
+            </div>
+          )}
           {tab === 'journal' && <ForensicsView symbols={symbols} />}
           {tab === 'risk' && <RiskConfigView onToast={showToast} />}
           {tab === 'setup' && <SetupView onToast={showToast} />}
