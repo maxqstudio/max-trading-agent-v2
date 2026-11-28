@@ -167,8 +167,8 @@ class FiltersConfig(BaseModel):
 
     htf_mode: Literal["off", "on", "auto"] = "auto"
     htf_timeframe: Literal["M15", "H1", "BOTH"] = "BOTH"
-    trend_strategies_require_htf: bool = True
-    block_breakout_in_ranging: bool = True
+    trend_strategies_require_htf: bool = False
+    block_breakout_in_ranging: bool = False
     session_mode: Literal["off", "on", "auto"] = "auto"
     blocked_sessions: list[str] = Field(default_factory=lambda: ["asia", "late"])  # used by "on"
     # M15 Ichimoku checklist (price vs cloud, Tenkan vs Kijun, Chikou, price vs Kijun, future cloud):

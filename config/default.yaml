@@ -156,8 +156,8 @@ exits:
 filters:
   htf_mode: "auto"
   htf_timeframe: "BOTH"
-  trend_strategies_require_htf: true
-  block_breakout_in_ranging: true
+  trend_strategies_require_htf: false
+  block_breakout_in_ranging: false
   session_mode: "auto"
   blocked_sessions: ["asia", "late"]
   ichimoku_mode: "auto"

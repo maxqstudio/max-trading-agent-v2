@@ -586,12 +586,14 @@ async def test_shadow_challenger_respects_ai_supervisor_brief_and_p0_filters(tmp
         assert orch.shadow_raw_positions["XAUUSD"].version_id.endswith("-raw")
         assert orch.supervisor.stats["reject"] == 0
 
-        # 2. Micro Breakout in RANGING -> Challenger (AI Veto) blocks via P0 guard even when brief allows BOTH!
+        # 2. Micro Breakout in RANGING -> when optional override is enabled, Challenger (AI Veto) blocks it even when brief allows BOTH!
+        orch.config.filters.block_breakout_in_ranging = True
         orch.supervisor.brief["XAUUSD"] = SymbolBrief(symbol="XAUUSD", bias="BOTH", risk_multiplier=1.0, avoid_strategies=[], reason="Two-way")
         bo_sig = sig_buy.model_copy(update={"strategy_id": "micro_breakout"})
         orch.shadow_suite.scan_all = lambda *a, **kw: [bo_sig]
         await orch._scan_shadow_challenger("XAUUSD", bars, snap, MarketRegime.RANGING, dl, 10.0, spec, now_s, htf=(1, 1))
         assert "XAUUSD" not in orch.shadow_positions
+        orch.config.filters.block_breakout_in_ranging = False
 
         # 3. Liquidity sweep when brief allows LONG_ONLY with risk_multiplier=0.5 -> Challenger (AI Veto) opens at 0.5x!
         orch.supervisor.brief["XAUUSD"] = SymbolBrief(symbol="XAUUSD", bias="LONG_ONLY", risk_multiplier=0.5, avoid_strategies=[], reason="Half size")
