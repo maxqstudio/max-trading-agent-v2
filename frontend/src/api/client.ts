@@ -84,6 +84,11 @@ export const api = {
   getBrain: (symbol: string) => req<any>(`/api/brain?symbol=${encodeURIComponent(symbol)}`),
   getEvolution: () => req<any>('/api/evolution'),
   runEvolution: () => req<any>('/api/evolution/run', { method: 'POST' }),
+  getResearch: () => req<any>('/api/research'),
+  runResearch: (body: { window_bars?: number; dry_run?: boolean; force?: boolean } = {}) =>
+    req<any>('/api/research/run', { method: 'POST', body: JSON.stringify(body) }),
+  importResearchCsv: (filename: string, content: string) =>
+    req<any>('/api/research/import-csv', { method: 'POST', body: JSON.stringify({ filename, content }) }),
   approveChallenger: () => req<any>('/api/evolution/approve', { method: 'POST' }),
   rejectChallenger: () => req<any>('/api/evolution/reject', { method: 'POST' }),
   rollbackChampion: (version_id: string) =>

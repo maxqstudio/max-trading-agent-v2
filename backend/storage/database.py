@@ -182,6 +182,21 @@ class Database:
         rows = await cur.fetchall()
         return [Bar(**dict(r)) for r in reversed(rows)]
 
+    async def get_bar_coverage(self, timeframe: str = "M1") -> list[dict[str, Any]]:
+        """Per-symbol historical bar counts and timestamp spans for Training Ground / Research coverage."""
+        cur = await self.conn.execute(
+            """
+            SELECT symbol, COUNT(*) AS bars, MIN(timestamp) AS min_ts, MAX(timestamp) AS max_ts
+            FROM bars
+            WHERE timeframe = ?
+            GROUP BY symbol
+            ORDER BY symbol
+            """,
+            (timeframe,),
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
     async def save_trade(self, trade: TradeRecord) -> None:
         await self.conn.execute(
             """

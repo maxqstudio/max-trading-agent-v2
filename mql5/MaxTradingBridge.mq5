@@ -4,7 +4,7 @@
 //| Zero-DLL Local HTTP/JSON Bridge + Independent Hard Risk Guard    |
 //+------------------------------------------------------------------+
 #property copyright "Max Trading Agent v2"
-#property version   "2.20"
+#property version   "2.21"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -15,8 +15,8 @@ input string   BridgeUrl              = "http://127.0.0.1:8765/api/bridge/sync";
 input string   BridgeAuthToken        = "";      // Filled in by setup_and_test.bat (never commit a real token)
 input int      SyncIntervalMs         = 350;      // Fast poll interval (ms)
 input int      WebTimeoutMs           = 2000;     // HTTP timeout (ms)
-input int      BackfillBars           = 3000;     // Startup M1 history bars (~2+ days) for HTF/Ichimoku/DL warmup
-input int      BackfillChunkSize      = 300;      // Historical bars per sync tick (non-blocking chunked backfill)
+input int      BackfillBars           = 20160;    // Startup M1 history bars (~14 days) for HTF/Ichimoku/DL warmup
+input int      BackfillChunkSize      = 500;      // Historical bars per sync tick (non-blocking chunked backfill)
 input string   LogicalSymbols         = "XAUUSD,EURUSD,GBPUSD,USDJPY"; // Watchlist (plain names). Missing ones are skipped
 input bool     IncludeChartSymbol     = true;     // Also trade the symbol of the chart the EA is on
 input string   SymbolSuffix           = "";       // Leave empty = auto-detect (e.g. ".m", "m", ".pro")
@@ -40,6 +40,8 @@ string         g_broker[];
 datetime       g_lastBarTime[];
 int            g_backfillRemaining[];
 int            g_backfillRetries[];
+int            g_backfillPartialRetries[];
+bool           g_backfillShortPage[];
 datetime       g_dayStartDate         = 0;
 double         g_dayStartEquity       = 0.0;
 datetime       g_lastPythonHeartbeat  = 0;
@@ -406,7 +408,7 @@ string BuildSyncJson() {
    j += "\"hard_max_positions\":" + IntegerToString(HardMaxPositions) + ",";
    j += "\"heartbeat_timeout_sec\":" + IntegerToString(HeartbeatTimeoutSec) + ",";
    j += "\"order_ttl_ms\":" + IntegerToString(DefaultOrderTTLMs) + ",";
-   j += "\"ea_version\":\"2.2.0\",\"synced\":true},";
+   j += "\"ea_version\":\"2.2.1\",\"synced\":true},";
    j += "\"server_utc_offset_sec\":" + IntegerToString(ServerUtcOffsetSec()) + ",";
    j += BuildCalendarJson();
 
@@ -457,7 +459,7 @@ string BuildSyncJson() {
    // Chunked Startup Historical M1 Backfill (newest -> oldest so live chart candles never disappear!)
    j += "\"history_bars\":[";
    bool firstHist = true;
-   int chunkBudget = BackfillChunkSize > 0 ? BackfillChunkSize : 300;
+   int chunkBudget = BackfillChunkSize > 0 ? BackfillChunkSize : 500;
    int targetBars  = MathMax(0, BackfillBars);
    for(int i = 0; i < nSym; i++) {
       if(g_backfillRemaining[i] <= 0 || targetBars <= 0) continue;
@@ -469,17 +471,25 @@ string BuildSyncJson() {
       MqlRates hRates[];
       int copied = CopyRates(bs, PERIOD_M1, startShift, take, hRates);
       if(copied <= 0) {
-         // Broker may still be downloading M1 history for non-chart symbols: retry up to 4 syncs before finishing
-         g_backfillRetries[i]++;
-         if(g_backfillRetries[i] >= 4) g_backfillRemaining[i] = 0;
+         // Retry page reads while MT5 downloads history; a short page gets 3 no-progress retries.
+         if(g_backfillShortPage[i]) {
+            g_backfillPartialRetries[i]++;
+            if(g_backfillPartialRetries[i] >= 3) g_backfillRemaining[i] = 0;
+         } else {
+            g_backfillRetries[i]++;
+            if(g_backfillRetries[i] >= 10) g_backfillRemaining[i] = 0;
+         }
          continue;
       }
       g_backfillRetries[i] = 0;
       g_backfillRemaining[i] = MathMax(0, g_backfillRemaining[i] - copied);
       if(copied < take) {
-         // Broker returned fewer bars than requested — allow 1 more attempt in case history is still paging
-         if(g_backfillRetries[i] >= 1) g_backfillRemaining[i] = 0;
-         else g_backfillRetries[i]++;
+         // The returned bars are contiguous; resume at the next older shift and retry a stalled page 3 times.
+         g_backfillShortPage[i] = true;
+         g_backfillPartialRetries[i] = 0;
+      } else {
+         g_backfillShortPage[i] = false;
+         g_backfillPartialRetries[i] = 0;
       }
       ArraySetAsSeries(hRates, false);
       for(int k = 0; k < copied; k++) {
@@ -655,11 +665,15 @@ void AddSymbol(const string logical, const string broker) {
    ArrayResize(g_lastBarTime, n + 1);
    ArrayResize(g_backfillRemaining, n + 1);
    ArrayResize(g_backfillRetries, n + 1);
+   ArrayResize(g_backfillPartialRetries, n + 1);
+   ArrayResize(g_backfillShortPage, n + 1);
    g_logical[n] = logical;
    g_broker[n] = broker;
    g_lastBarTime[n] = 0;
    g_backfillRemaining[n] = MathMax(0, BackfillBars);
    g_backfillRetries[n] = 0;
+   g_backfillPartialRetries[n] = 0;
+   g_backfillShortPage[n] = false;
    SymbolSelect(broker, true);
 }
 
@@ -689,6 +703,8 @@ int OnInit() {
    ArrayResize(g_lastBarTime, 0);
    ArrayResize(g_backfillRemaining, 0);
    ArrayResize(g_backfillRetries, 0);
+   ArrayResize(g_backfillPartialRetries, 0);
+   ArrayResize(g_backfillShortPage, 0);
    if(IncludeChartSymbol) AddSymbol(StripAffixes(_Symbol), _Symbol);
    for(int i = 0; i < n; i++) {
       if(watch[i] == "") continue;
@@ -703,7 +719,7 @@ int OnInit() {
    g_dayStartDate        = TimeGMT();
    g_lastPythonHeartbeat = TimeGMT();
    EventSetMillisecondTimer(SyncIntervalMs);
-   Print("MaxTradingBridge v2.20 initialized. Bridge URL: ", BridgeUrl);
+   Print("MaxTradingBridge v2.21 initialized. Bridge URL: ", BridgeUrl);
    return(INIT_SUCCEEDED);
 }
 
@@ -733,7 +749,7 @@ void OnTimer() {
       g_lastPythonHeartbeat = TimeGMT();
       if(!g_connected) {
          Print("MaxTradingBridge: CONNECTED to robot (", BridgeUrl, ")");
-         Comment("MaxTradingBridge v2.20 | CONNECTED to robot | ", ArraySize(g_logical), " symbols");
+         Comment("MaxTradingBridge v2.21 | CONNECTED to robot | ", ArraySize(g_logical), " symbols");
       }
       g_connected = true;
       string respStr = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
@@ -743,7 +759,7 @@ void OnTimer() {
       if(g_connected || code != g_lastSyncCode || TimeGMT() - g_lastErrorPrint >= 10) {
          string hint = SyncErrorHint(code, err);
          Print("MaxTradingBridge: sync GAGAL (http=", code, ", err=", err, "). ", hint);
-         Comment("MaxTradingBridge v2.20 | NOT CONNECTED (http=", code, ", err=", err, ")\n", hint);
+         Comment("MaxTradingBridge v2.21 | NOT CONNECTED (http=", code, ", err=", err, ")\n", hint);
          g_lastErrorPrint = TimeGMT();
       }
       g_connected = false;
