@@ -187,6 +187,8 @@ class ChampionChallengerGate:
         if self.active_challenger is None:
             return None
         cand = self.active_challenger
+        if cand.status != "PENDING_APPROVAL":
+            return None
         promoted_ver = cand.version_id.replace("-cand", "")
         new_cfg = TradingConfig.model_validate(cand.config_snapshot)
         new_cfg.app.version = promoted_ver

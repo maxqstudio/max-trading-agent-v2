@@ -141,9 +141,9 @@ class PortfolioRiskManager:
         step = max(spec.volume_step, 0.001)
         floored = math.floor(raw_lots / step) * step
         if floored < spec.volume_min:
-            # Verify even min lot won't blow > 2x intended risk
+            # Strict cap: never allow minimum lot to exceed configured max_risk_pct
             min_lot_risk_pct = ((spec.volume_min * loss_per_lot) / equity) * 100.0
-            if min_lot_risk_pct <= self.config.max_risk_pct * 1.5:
+            if min_lot_risk_pct <= self.config.max_risk_pct:
                 return round(spec.volume_min, 4)
             return 0.0
         return round(min(floored, spec.volume_max), 4)

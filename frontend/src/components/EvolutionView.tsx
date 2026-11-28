@@ -89,14 +89,25 @@ export const EvolutionView: React.FC<Props> = ({ onToast }) => {
             {cand && (
               <div className="flex gap-2">
                 <button
+                  disabled={cand.status !== 'PENDING_APPROVAL'}
+                  title={
+                    cand.status === 'PENDING_APPROVAL'
+                      ? 'Promote this validated Challenger (config + DL/ML weights) to Champion'
+                      : `Must finish Live Shadow Arena first (${cand.shadow_trades} shadow trades so far)`
+                  }
                   onClick={async () => {
-                    await api.approveChallenger();
-                    onToast(`Promoted ${cand.version_id} to Champion!`);
-                    load();
+                    try {
+                      await api.approveChallenger();
+                      onToast(`Promoted ${cand.version_id} to Champion!`);
+                      load();
+                    } catch (e: any) {
+                      onToast(`Promotion refused: ${e.message}`);
+                    }
                   }}
-                  className="px-2.5 py-1 rounded bg-[#10B981] text-white text-xs font-bold flex items-center gap-1 cursor-pointer"
+                  className="px-2.5 py-1 rounded bg-[#10B981] text-white text-xs font-bold flex items-center gap-1 cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed"
                 >
-                  <Check className="w-3.5 h-3.5" /> Approve & Promote
+                  <Check className="w-3.5 h-3.5" />{' '}
+                  {cand.status === 'PENDING_APPROVAL' ? 'Approve & Promote' : `Shadowing (${cand.shadow_trades})`}
                 </button>
                 <button
                   onClick={async () => {

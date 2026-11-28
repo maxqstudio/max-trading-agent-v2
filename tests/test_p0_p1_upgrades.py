@@ -756,3 +756,130 @@ def test_time_decay_weights_weighted_training_and_oos_margin():
     assert not dec_noisy_ml["adopted"] and picked_noisy_ml._brier == 0.220
     picked_real_ml, dec_real_ml = _pick_ml(_StubML(0.220), _StubML(0.210), x_tab, y_tab, min_oos_gain=0.005)
     assert dec_real_ml["adopted"] and picked_real_ml._brier == 0.210
+
+
+def test_p0_cannot_promote_shadowing_challenger_before_pending_approval():
+    from backend.core.models import BacktestMetrics, ParameterPatch
+    from backend.evolution.champion_gate import ChampionChallengerGate
+
+    cfg = TradingConfig()
+    cfg.evolution.shadow_min_trades = 4
+    gate = ChampionChallengerGate(cfg, initial_equity=10000.0)
+    strong = BacktestMetrics(total_trades=40, profit_factor=1.6, sharpe_ratio=2.0, expectancy_r=0.3, max_drawdown_pct=1.2, mc_p95_dd_pct=2.5)
+    base = BacktestMetrics(total_trades=40, profit_factor=1.2, sharpe_ratio=1.0, expectancy_r=0.1, max_drawdown_pct=2.0, mc_p95_dd_pct=3.5)
+
+    cand = gate.submit_candidate(cfg, [ParameterPatch(path="ai.ml_min_probability", old_value=0.56, new_value=0.60)], strong, base)
+    assert cand.status == "SHADOWING"
+    # P0 guard: MUST refuse premature promotion while still SHADOWING!
+    assert gate.promote_active_challenger(note="Premature") is None
+    assert gate.active_challenger is cand
+
+    # Once Challenger passes Shadow Arena -> PENDING_APPROVAL -> promotion succeeds
+    for idx in range(4):
+        gate.record_shadow_trade(
+            TradeRecord(
+                is_shadow=True,
+                symbol="XAUUSD",
+                strategy_id="ema_vwap_pullback",
+                regime=MarketRegime.TRENDING_BULL,
+                side=Side.BUY,
+                volume=0.1,
+                entry_price=2650.0,
+                exit_price=2654.0,
+                sl_price=2648.0,
+                tp_price=2654.0,
+                open_time=1000 + idx * 60,
+                close_time=1050 + idx * 60,
+                pnl_money=50.0,
+                pnl_r=1.2,
+            )
+        )
+    assert cand.status == "PENDING_APPROVAL"
+    promoted = gate.promote_active_challenger(note="Validated")
+    assert promoted is not None and promoted.status == "ACTIVE"
+
+
+def test_p0_min_lot_strictly_capped_at_max_risk_pct():
+    from backend.core.config import RiskConfig
+
+    # With equity=$1,000 and max_risk_pct=1.0% ($10 max risk), a 0.01 lot trade risking $12 (1.2%) MUST be rejected (0.0)
+    rm = PortfolioRiskManager(RiskConfig(risk_per_trade_pct=0.5, max_risk_pct=1.0))
+    spec = _xau_spec()  # tick_size=0.01, tick_value=1.0 -> $100 per $1 move per 1.0 lot -> $1 per $1 move per 0.01 lot
+    # SL distance = $11.50 + comm $0.07/0.01 lot -> loss_per_lot = $1157 -> 0.01 lot risks $11.57 (1.157% > 1.0%)
+    lots_too_risky = rm.calculate_lot_from_spec(equity=1000.0, risk_pct=0.5, sl_distance_price=11.5, spec=spec, commission_per_lot=7.0)
+    assert lots_too_risky == 0.0
+
+    # SL distance = $8.00 + comm $7 -> loss_per_lot = $807 -> 0.01 lot risks $8.07 (0.807% <= 1.0%) -> allowed
+    lots_within_cap = rm.calculate_lot_from_spec(equity=1000.0, risk_pct=0.5, sl_distance_price=8.0, spec=spec, commission_per_lot=7.0)
+    assert lots_within_cap == 0.01
+
+
+@pytest.mark.asyncio
+async def test_p0_atomic_champion_bundle_promote_and_rollback(tmp_path):
+    import numpy as np
+    from backend.core.models import BacktestMetrics, ParameterPatch
+    from backend.evolution.meta_labeler import CalibratedMetaLabeler
+    from backend.evolution.sequence_net import SequenceConvNet
+
+    cfg = TradingConfig()
+    cfg.app.database_path = str(tmp_path / "atomic.db")
+    cfg.app.snapshots_dir = str(tmp_path / "snaps")
+    cfg.app.kill_switch_path = str(tmp_path / "kill.json")
+    cfg.evolution.shadow_min_trades = 2
+    env = EnvSettings(bridge_auth_token="a" * 32, control_api_token="b" * 32)
+
+    db = Database(cfg.app.database_path)
+    await db.connect()
+    try:
+        orch = TradingOrchestrator(cfg, env, db, llm_router=LLMRouter(resolved=[]))
+        await orch.initialize_from_storage()
+
+        # Seed distinct Champion v1 DL/ML weights
+        rng = np.random.default_rng(1)
+        x_seq = rng.normal(size=(40, 32, 8))
+        yd = rng.integers(0, 3, size=(40,))
+        yv = rng.integers(0, 2, size=(40,)).astype(np.float64)
+        orch.dl_net = SequenceConvNet(seed=10)
+        orch.dl_net.fit(x_seq, yd, yv, epochs=2)
+        v1_w1 = orch.dl_net.params["w1"].copy()
+
+        x_tab = rng.normal(size=(60, 24))
+        y_tab = (x_tab[:, 0] > 0).astype(np.int64)
+        orch.ml_labeler = CalibratedMetaLabeler(random_state=10)
+        orch.ml_labeler.fit_purged_walk_forward(x_tab, y_tab)
+        v1_ver = orch.gate.active_snapshot.version_id
+
+        # Stage Challenger v2 with distinct DL/ML weights
+        strong = BacktestMetrics(total_trades=40, profit_factor=1.6, sharpe_ratio=2.0, expectancy_r=0.3, max_drawdown_pct=1.0, mc_p95_dd_pct=2.0)
+        base = BacktestMetrics(total_trades=40, profit_factor=1.2, sharpe_ratio=1.0, expectancy_r=0.1, max_drawdown_pct=2.0, mc_p95_dd_pct=3.0)
+        cand = orch.gate.submit_candidate(cfg, [ParameterPatch(path="ai.ml_min_probability", old_value=0.56, new_value=0.60)], strong, base)
+        assert cand.status == "SHADOWING"
+
+        cand_dl = SequenceConvNet(seed=99)
+        cand_dl.fit(x_seq, yd, yv, epochs=2)
+        v2_w1 = cand_dl.params["w1"].copy()
+        assert not np.allclose(v1_w1, v2_w1)
+
+        cand_ml = CalibratedMetaLabeler(random_state=99)
+        cand_ml.fit_purged_walk_forward(x_tab, y_tab)
+        orch.shadow_dl_net = cand_dl
+        orch.shadow_ml_labeler = cand_ml
+        orch._save_version_models(cand.version_id, cand_dl, cand_ml)
+
+        # While SHADOWING: Champion weights MUST remain v1, and premature promote MUST return None
+        assert np.allclose(orch.dl_net.params["w1"], v1_w1)
+        assert await orch.promote_active_challenger("premature") is None
+
+        # Pass Shadow Arena -> PENDING_APPROVAL -> atomic promote activates v2 DL/ML weights
+        cand.status = "PENDING_APPROVAL"
+        promoted = await orch.promote_active_challenger("validated")
+        assert promoted is not None
+        assert np.allclose(orch.dl_net.params["w1"], v2_w1)
+        assert orch.shadow_dl_net is None
+
+        # Atomic rollback to v1 MUST restore v1 DL weights too!
+        restored = await orch.rollback_champion(v1_ver)
+        assert restored is not None
+        assert np.allclose(orch.dl_net.params["w1"], v1_w1)
+    finally:
+        await db.close()
