@@ -163,18 +163,18 @@ export const FiltersCard: React.FC<{ view: FiltersView; onSaved: (v: FiltersView
           <label className="flex items-center gap-1.5 cursor-pointer">
             <input
               type="checkbox"
-              checked={s.trend_strategies_require_htf ?? true}
+              checked={s.trend_strategies_require_htf ?? false}
               onChange={(e) => setS({ ...s, trend_strategies_require_htf: e.target.checked })}
             />
-            <span>Trend strategies require HTF direction</span>
+            <span>Force trend strategies to follow HTF (manual override)</span>
           </label>
           <label className="flex items-center gap-1.5 cursor-pointer">
             <input
               type="checkbox"
-              checked={s.block_breakout_in_ranging ?? true}
+              checked={s.block_breakout_in_ranging ?? false}
               onChange={(e) => setS({ ...s, block_breakout_in_ranging: e.target.checked })}
             />
-            <span>Block Micro Breakout in Ranging regime</span>
+            <span>Force-block Micro Breakout in Ranging (manual override)</span>
           </label>
         </div>
         <StatsTable rows={view.htf[s.htf_timeframe] ?? []} label={(b) => BUCKET_LABEL[b] ?? b} minSamples={s.min_samples} />
