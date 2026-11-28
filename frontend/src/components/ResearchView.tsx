@@ -327,7 +327,9 @@ export const ResearchView: React.FC<Props> = ({ onToast }) => {
                   <th className="py-1.5 px-2">From (UTC)</th>
                   <th className="py-1.5 px-2">To (UTC)</th>
                   <th className="py-1.5 px-2 text-right">Span (Days)</th>
-                  <th className="py-1.5 px-2 w-44">14-Day Window Fill</th>
+                  <th className="py-1.5 px-2 w-44">
+                    {Math.max(1, Math.round(windowBars / 1440))}-Day Window Fill
+                  </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#1F2D45]/70">
@@ -339,10 +341,11 @@ export const ResearchView: React.FC<Props> = ({ onToast }) => {
                   </tr>
                 ) : (
                   coverage.map((row) => {
+                    const fillPct = Math.min(100, (row.bars / Math.max(windowBars, 1)) * 100);
                     const barColor =
-                      row.duration_days >= 14
+                      fillPct >= 95
                         ? 'bg-[#10B981]'
-                        : row.duration_days >= 7
+                        : fillPct >= 50
                           ? 'bg-[#06B6D4]'
                           : 'bg-[#F59E0B]';
                     return (
@@ -357,9 +360,9 @@ export const ResearchView: React.FC<Props> = ({ onToast }) => {
                         <td className="py-1.5 px-2">
                           <div className="flex items-center gap-2">
                             <div className="flex-1 h-1.5 rounded-full bg-[#070B12] overflow-hidden">
-                              <div className={`h-full ${barColor}`} style={{ width: `${Math.min(100, row.pct_of_window)}%` }} />
+                              <div className={`h-full ${barColor}`} style={{ width: `${fillPct}%` }} />
                             </div>
-                            <span className="w-10 text-right text-[#8A9BB5]">{row.pct_of_window.toFixed(0)}%</span>
+                            <span className="w-10 text-right text-[#8A9BB5]">{fillPct.toFixed(0)}%</span>
                           </div>
                         </td>
                       </tr>
