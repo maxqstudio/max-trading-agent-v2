@@ -331,5 +331,46 @@ def test_research_api_import_csv_and_run_audit(tmp_path: Path, monkeypatch) -> N
         assert st_after["last_audit"] is not None
         assert st_after["dl_champion"]["trained"] is True
         assert st_after["ml_champion"]["trained"] is True
+
+        # 5. Verify GET /api/report returns KPIs, breakdowns, leaderboard & OOS benchmark
+        now_s = int(datetime.now(timezone.utc).timestamp())
+        asyncio.run(
+            db.save_trade(
+                TradeRecord(
+                    trade_id="rpt-1",
+                    ticket=101,
+                    is_shadow=False,
+                    version_id="PAPER-RAW",
+                    symbol="XAUUSD",
+                    strategy_id="ema_vwap_pullback",
+                    regime=MarketRegime.TRENDING_BULL,
+                    side=Side.BUY,
+                    volume=0.05,
+                    entry_price=2650.0,
+                    exit_price=2654.0,
+                    sl_price=2648.0,
+                    tp_price=2654.0,
+                    open_time=now_s - 300,
+                    close_time=now_s - 60,
+                    pnl_money=20.0,
+                    pnl_r=1.8,
+                    mae_r=-0.2,
+                    mfe_r=1.9,
+                    ml_confidence=0.62,
+                    dl_confidence=0.58,
+                    exit_reason="TP",
+                )
+            )
+        )
+        rep = client.get("/api/report?book=RAW&days=7", headers=headers)
+        assert rep.status_code == 200, rep.text
+        rb = rep.json()
+        assert rb["summary"]["total_trades"] == 1
+        assert rb["summary"]["wins"] == 1
+        assert rb["summary"]["net_pnl"] == 20.0
+        assert rb["oos_benchmark"] is not None
+        assert any(r["group"] == "ema_vwap_pullback" and r["total_trades"] == 1 for r in rb["by_strategy"])
+        assert any(r["group"] == "TRENDING_BULL" and r["total_trades"] == 1 for r in rb["by_regime"])
+        assert "# Performance Report" in rb["markdown_report"]
     finally:
         asyncio.run(db.close())

@@ -95,6 +95,8 @@ export const api = {
     req<any>('/api/evolution/rollback', { method: 'POST', body: JSON.stringify({ version_id }) }),
   getJournal: (mode = 'ALL', symbol = 'ALL') =>
     req<any>(`/api/journal?mode=${encodeURIComponent(mode)}&symbol=${encodeURIComponent(symbol)}&limit=100`),
+  getReport: (book = 'RAW', days = 0) =>
+    req<any>(`/api/report?book=${encodeURIComponent(book)}&days=${encodeURIComponent(String(days))}`),
   getConfig: () => req<any>('/api/config'),
   updateRisk: (body: Record<string, unknown>) =>
     req<any>('/api/config/risk', { method: 'PUT', body: JSON.stringify(body) }),

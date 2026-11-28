@@ -2,6 +2,7 @@ import { useState } from 'react';
 import {
   Activity,
   AlertTriangle,
+  BarChart3,
   Cpu,
   FileText,
   FlaskConical,
@@ -22,6 +23,7 @@ import { KillSwitchModal } from './components/KillSwitchModal';
 import { LiveCandleChart } from './components/LiveCandleChart';
 import { LiveStatusStrip } from './components/LiveStatusStrip';
 import { PaperCompare } from './components/PaperCompare';
+import { ReportView } from './components/ReportView';
 import { ResearchView } from './components/ResearchView';
 import { RiskConfigView } from './components/RiskConfigView';
 import { SetupView } from './components/SetupView';
@@ -29,7 +31,7 @@ import type { DecisionEvent } from './types/trading';
 import { BullishLogo } from './components/BullishLogo';
 import { human, humanText } from './labels';
 
-type TabId = 'cockpit' | 'brain' | 'evolution' | 'research' | 'journal' | 'risk' | 'setup';
+type TabId = 'cockpit' | 'brain' | 'evolution' | 'research' | 'report' | 'journal' | 'risk' | 'setup';
 
 // Result of a closed trade in the execution stream: from metadata, or parsed from older messages.
 function tradeResult(d: DecisionEvent): number | null {
@@ -237,6 +239,7 @@ export default function App() {
             { id: 'brain' as TabId, label: 'AI Brain & Regimes', icon: Cpu },
             { id: 'evolution' as TabId, label: 'Evolution & Challenger', icon: RefreshCw, badge: state?.active_challenger ? 1 : 0 },
             { id: 'research' as TabId, label: 'Training Ground', icon: FlaskConical },
+            { id: 'report' as TabId, label: 'Performance Report', icon: BarChart3 },
             { id: 'journal' as TabId, label: 'Trade Forensics', icon: FileText },
             { id: 'risk' as TabId, label: 'Risk, Shields & MT5', icon: Shield },
             { id: 'setup' as TabId, label: 'Setup (AI, Supervisor)', icon: Settings },
@@ -474,6 +477,7 @@ export default function App() {
           {tab === 'brain' && <BrainView symbols={symbols} />}
           {tab === 'evolution' && <EvolutionView onToast={showToast} />}
           {tab === 'research' && <ResearchView onToast={showToast} />}
+          {tab === 'report' && <ReportView onToast={showToast} />}
           {tab === 'journal' && <ForensicsView symbols={symbols} />}
           {tab === 'risk' && <RiskConfigView onToast={showToast} />}
           {tab === 'setup' && <SetupView onToast={showToast} />}
