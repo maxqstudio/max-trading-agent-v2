@@ -150,15 +150,18 @@ def create_app(orchestrator: TradingOrchestrator) -> FastAPI:
 
     @api.post("/evolution/approve")
     async def approve_challenger() -> dict[str, Any]:
-        snap = orchestrator.gate.promote_active_challenger(
-            note="Approved from Quant Cockpit Dashboard",
-            current_equity=orchestrator.account.equity,
-        )
-        if snap is None:
+        cand = orchestrator.gate.active_challenger
+        if cand is None:
             raise HTTPException(status_code=400, detail="No active Challenger to promote")
-        orchestrator.apply_champion_config(orchestrator.gate.active_config)
-        for s in orchestrator.gate.snapshots:
-            await orchestrator.db.save_snapshot(s)
+        if cand.status != "PENDING_APPROVAL":
+            min_req = orchestrator.config.evolution.shadow_min_trades
+            raise HTTPException(
+                status_code=400,
+                detail=f"Challenger {cand.version_id} is still {cand.status} ({cand.shadow_trades}/{min_req} shadow trades) — must pass Shadow Arena before promotion",
+            )
+        snap = await orchestrator.promote_active_challenger(note="Approved from Quant Cockpit Dashboard")
+        if snap is None:
+            raise HTTPException(status_code=400, detail="Challenger could not be promoted")
         return {"promoted": snap.model_dump(mode="json")}
 
     @api.post("/evolution/reject")
@@ -166,16 +169,15 @@ def create_app(orchestrator: TradingOrchestrator) -> FastAPI:
         ok = orchestrator.gate.reject_active_challenger("Rejected from Quant Cockpit Dashboard")
         if not ok:
             raise HTTPException(status_code=400, detail="No active Challenger to reject")
+        orchestrator.shadow_dl_net = None
+        orchestrator.shadow_ml_labeler = None
         return {"rejected": True}
 
     @api.post("/evolution/rollback")
     async def rollback_champion(req: RollbackRequest) -> dict[str, Any]:
-        restored = orchestrator.gate.rollback_to(req.version_id, auto=False)
+        restored = await orchestrator.rollback_champion(req.version_id, auto=False)
         if restored is None:
             raise HTTPException(status_code=404, detail=f"Snapshot {req.version_id} not found")
-        orchestrator.apply_champion_config(orchestrator.gate.active_config)
-        for s in orchestrator.gate.snapshots:
-            await orchestrator.db.save_snapshot(s)
         return {"restored": restored.model_dump(mode="json")}
 
     # --- Trade Forensics & Analytics ---

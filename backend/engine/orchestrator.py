@@ -199,6 +199,8 @@ class TradingOrchestrator:
         # 4-Pillar Self-Improving AI
         self.dl_net = SequenceConvNet()
         self.ml_labeler = CalibratedMetaLabeler()
+        self.shadow_dl_net: SequenceConvNet | None = None
+        self.shadow_ml_labeler: CalibratedMetaLabeler | None = None
         self.bandit = ContextualBanditRL(forgetting_factor=config.ai.bandit_forgetting_factor)
         self.rl_exit = RLExitAgent(
             be_trigger_r=config.ai.rl_exit_be_trigger_r,
@@ -318,9 +320,18 @@ class TradingOrchestrator:
         for ev in reversed(saved_decs):
             self.recent_decisions.appendleft(ev)
 
-        dl_path = f"{self.config.app.snapshots_dir}/dl_champion.npz"
-        self.dl_net.load(dl_path)
-        self.ml_labeler.load(f"{self.config.app.snapshots_dir}/ml_champion.pkl")
+        active_ver = self.gate.active_snapshot.version_id
+        dl_ver_path, ml_ver_path = self._version_model_paths(active_ver)
+        if not self.dl_net.load(dl_ver_path):
+            self.dl_net.load(f"{self.config.app.snapshots_dir}/dl_champion.npz")
+            if self.dl_net.trained:
+                self.dl_net.save(dl_ver_path)
+        if not self.ml_labeler.load(ml_ver_path):
+            self.ml_labeler.load(f"{self.config.app.snapshots_dir}/ml_champion.pkl")
+            if self.ml_labeler.trained:
+                self.ml_labeler.save(ml_ver_path)
+        if self.gate.active_challenger is not None:
+            self._load_challenger_models(self.gate.active_challenger.version_id)
         self.last_research_audit = await self.db.get_kv("last_research_audit")
 
     def apply_active_config(self, cfg: TradingConfig) -> None:
@@ -513,6 +524,7 @@ class TradingOrchestrator:
 
             rolled = self.gate.check_live_rollback_guard(self.account.equity, trade_closed=True)
             if rolled is not None:
+                self._restore_version_models(rolled.version_id)
                 self.apply_champion_config(self.gate.active_config)
                 for sn in self.gate.snapshots:
                     await self.db.save_snapshot(sn)
@@ -521,10 +533,10 @@ class TradingOrchestrator:
                         symbol="SYSTEM",
                         category="EVOLUTION",
                         tag="AUTO ROLLBACK",
-                        message=f"Post-promotion drawdown triggered automatic rollback to Champion {rolled.version_id}",
+                        message=f"Post-promotion drawdown triggered automatic rollback to Champion {rolled.version_id} (config + DL/ML weights)",
                     )
                 )
-                await self._notify(f"AUTO-ROLLBACK TRIGGERED! Restored Champion {rolled.version_id}")
+                await self._notify(f"AUTO-ROLLBACK TRIGGERED! Restored Champion {rolled.version_id} (config + DL/ML)")
 
         # 4. Ingest live ticks & update Shadow Arena positions
         for tk in req.ticks:
@@ -1801,12 +1813,19 @@ class TradingOrchestrator:
         if max_cost_ratio > 0 and (spread_px + comm_px) / risk_d > max_cost_ratio:
             return
 
-        # Mirror Champion's RR-aware ML Meta-Labeler gate
+        # Mirror Champion's RR-aware ML Meta-Labeler gate using Challenger's staged DL/ML bundle when present
+        sh_dl = self.shadow_dl_net if (self.shadow_dl_net is not None and self.shadow_dl_net.trained) else self.dl_net
+        sh_ml = self.shadow_ml_labeler if (self.shadow_ml_labeler is not None and self.shadow_ml_labeler.trained) else self.ml_labeler
+        if sh_dl is not self.dl_net and sh_dl.trained:
+            seq = build_sequence_tensor(bars, seq_len=shadow_cfg.ai.dl_seq_len, point=spec.point)
+            sh_dl_pred = sh_dl.predict(seq)
+        else:
+            sh_dl_pred = dl_pred
         feat = extract_meta_features(
-            best, snap, spread_px, dl_pred, bars[-1].timestamp, htf=htf, server_offset_sec=self.server_offset_sec,
+            best, snap, spread_px, sh_dl_pred, bars[-1].timestamp, htf=htf, server_offset_sec=self.server_offset_sec,
             structure=structure_context(bars, ichi_m15, prev_day),
         )
-        ml_p = self.ml_labeler.predict_win_probability(feat)
+        ml_p = sh_ml.predict_win_probability(feat)
         sig_rr = abs(best.tp_price - best.entry_price) / max(abs(best.entry_price - best.sl_price), spec.point)
         if ml_p < effective_ml_cutoff(shadow_cfg.ai.ml_min_probability, sig_rr):
             return
@@ -1964,10 +1983,11 @@ class TradingOrchestrator:
                 if transition == "PENDING_APPROVAL":
                     await self._notify("Challenger passed Live Shadow Arena! Ready for /approve on Dashboard or Telegram.")
                 elif transition == "AUTO_PROMOTED":
+                    self._activate_challenger_models(self.gate.active_snapshot.version_id)
                     self.apply_champion_config(self.gate.active_config)
                     for sn in self.gate.snapshots:
                         await self.db.save_snapshot(sn)
-                    await self._notify(f"Challenger AUTO-PROMOTED to Champion {self.gate.active_snapshot.version_id}!")
+                    await self._notify(f"Challenger AUTO-PROMOTED to Champion {self.gate.active_snapshot.version_id} (config + DL/ML)!")
 
         if arena_changed:
             await self._save_arena()
@@ -2013,27 +2033,19 @@ class TradingOrchestrator:
                 self.config.evolution.param_window_bars,
             )
 
-            # A new model replaces the champion only when it scored better on unseen data.
-            if wfo.dl_decision.get("adopted"):
+            # Bootstrap cold-start models once if Champion has no trained DL/ML yet.
+            # Otherwise, new DL/ML weights NEVER bypass Shadow Arena: they are staged with the
+            # Challenger bundle and only promoted (or rolled back) atomically alongside config.
+            active_ver = self.gate.active_snapshot.version_id
+            dl_active_path, ml_active_path = self._version_model_paths(active_ver)
+            if not self.dl_net.trained and wfo.dl_decision.get("adopted"):
                 self.dl_net = wfo.trained_dl
                 self.dl_net.save(f"{self.config.app.snapshots_dir}/dl_champion.npz")
-            if wfo.ml_decision.get("adopted"):
+                self.dl_net.save(dl_active_path)
+            if not self.ml_labeler.trained and wfo.ml_decision.get("adopted"):
                 self.ml_labeler = wfo.trained_ml
                 self.ml_labeler.save(f"{self.config.app.snapshots_dir}/ml_champion.pkl")
-            n_bars = {s: len(b) for s, b in bars_map.items()}
-            for name, dec in (("1D-CNN", wfo.dl_decision), ("Meta-labeler", wfo.ml_decision)):
-                await self._log_decision(
-                    DecisionEvent(
-                        symbol="EVOLUTION",
-                        category="EVOLUTION",
-                        tag=f"{name} {'UPDATED' if dec.get('adopted') else 'KEPT'}",
-                        message=(
-                            f"{name}: {'new model adopted' if dec.get('adopted') else 'previous champion kept'}"
-                            f"{' (continued from the champion weights)' if dec.get('warm_start') else ''}. {dec.get('reason', '')}. "
-                            f"Data: {max(n_bars.values())} M1 bars per symbol"
-                        ),
-                    )
-                )
+                self.ml_labeler.save(ml_active_path)
 
             cand = self.gate.submit_candidate(
                 candidate_config=wfo.best_config,
@@ -2049,6 +2061,26 @@ class TradingOrchestrator:
 
             if cand.status == "SHADOWING":
                 self.shadow_suite = StrategySuite.from_config(wfo.best_config)
+                self.shadow_dl_net = wfo.trained_dl if wfo.trained_dl.trained else self.dl_net
+                self.shadow_ml_labeler = wfo.trained_ml if wfo.trained_ml.trained else self.ml_labeler
+                self._save_version_models(cand.version_id, self.shadow_dl_net, self.shadow_ml_labeler)
+
+            n_bars = {s: len(b) for s, b in bars_map.items()}
+            for name, dec in (("1D-CNN", wfo.dl_decision), ("Meta-labeler", wfo.ml_decision)):
+                staged = dec.get("adopted") and cand.status == "SHADOWING"
+                status_lbl = "STAGED IN SHADOW" if staged else ("ADOPTED (INIT)" if dec.get("adopted") else "KEPT")
+                await self._log_decision(
+                    DecisionEvent(
+                        symbol="EVOLUTION",
+                        category="EVOLUTION",
+                        tag=f"{name} {status_lbl}",
+                        message=(
+                            f"{name}: {status_lbl.lower()}"
+                            f"{' (continued from the champion weights)' if dec.get('warm_start') else ''}. {dec.get('reason', '')}. "
+                            f"Data: {max(n_bars.values())} M1 bars per symbol"
+                        ),
+                    )
+                )
 
             await self._log_decision(
                 DecisionEvent(
@@ -2074,6 +2106,80 @@ class TradingOrchestrator:
             }
         finally:
             self.evolution_running = False
+
+    def _version_model_paths(self, version_id: str) -> tuple[str, str]:
+        safe = "".join(ch if (ch.isalnum() or ch in ".-_") else "_" for ch in version_id)
+        base = self.config.app.snapshots_dir
+        return f"{base}/dl_{safe}.npz", f"{base}/ml_{safe}.pkl"
+
+    def _save_version_models(
+        self,
+        version_id: str,
+        dl_net: SequenceConvNet | None,
+        ml_labeler: CalibratedMetaLabeler | None,
+    ) -> None:
+        dl_p, ml_p = self._version_model_paths(version_id)
+        if dl_net is not None and dl_net.trained:
+            dl_net.save(dl_p)
+        if ml_labeler is not None and ml_labeler.trained:
+            ml_labeler.save(ml_p)
+
+    def _load_challenger_models(self, cand_version_id: str) -> None:
+        dl_p, ml_p = self._version_model_paths(cand_version_id)
+        cand_dl = SequenceConvNet()
+        self.shadow_dl_net = cand_dl if cand_dl.load(dl_p) and cand_dl.trained else None
+        cand_ml = CalibratedMetaLabeler()
+        self.shadow_ml_labeler = cand_ml if cand_ml.load(ml_p) and cand_ml.trained else None
+
+    def _activate_challenger_models(self, promoted_version_id: str) -> None:
+        """Promote staged Challenger DL/ML weights atomically into active Champion & persist versioned copies."""
+        if self.shadow_dl_net is not None and self.shadow_dl_net.trained:
+            self.dl_net = self.shadow_dl_net
+        if self.shadow_ml_labeler is not None and self.shadow_ml_labeler.trained:
+            self.ml_labeler = self.shadow_ml_labeler
+        if self.dl_net.trained:
+            self.dl_net.save(f"{self.config.app.snapshots_dir}/dl_champion.npz")
+        if self.ml_labeler.trained:
+            self.ml_labeler.save(f"{self.config.app.snapshots_dir}/ml_champion.pkl")
+        self._save_version_models(promoted_version_id, self.dl_net, self.ml_labeler)
+        self.shadow_dl_net = None
+        self.shadow_ml_labeler = None
+
+    def _restore_version_models(self, version_id: str) -> None:
+        """Restore DL/ML weights belonging to a previous Champion snapshot during rollback."""
+        dl_p, ml_p = self._version_model_paths(version_id)
+        restored_dl = SequenceConvNet()
+        if restored_dl.load(dl_p) and restored_dl.trained:
+            self.dl_net = restored_dl
+            self.dl_net.save(f"{self.config.app.snapshots_dir}/dl_champion.npz")
+        restored_ml = CalibratedMetaLabeler()
+        if restored_ml.load(ml_p) and restored_ml.trained:
+            self.ml_labeler = restored_ml
+            self.ml_labeler.save(f"{self.config.app.snapshots_dir}/ml_champion.pkl")
+
+    async def promote_active_challenger(self, note: str = "Approved by operator") -> Any:
+        """Atomically promote a PENDING_APPROVAL Challenger (config + staged DL/ML weights) to Champion."""
+        prev_ver = self.gate.active_snapshot.version_id
+        self._save_version_models(prev_ver, self.dl_net, self.ml_labeler)
+        snap = self.gate.promote_active_challenger(note=note, current_equity=self.account.equity)
+        if snap is None:
+            return None
+        self._activate_challenger_models(snap.version_id)
+        self.apply_champion_config(self.gate.active_config)
+        for s in self.gate.snapshots:
+            await self.db.save_snapshot(s)
+        return snap
+
+    async def rollback_champion(self, version_id: str, auto: bool = False) -> Any:
+        """Atomically roll back Champion config AND versioned DL/ML weights."""
+        restored = self.gate.rollback_to(version_id, auto=auto)
+        if restored is None:
+            return None
+        self._restore_version_models(restored.version_id)
+        self.apply_champion_config(self.gate.active_config)
+        for s in self.gate.snapshots:
+            await self.db.save_snapshot(s)
+        return restored
 
     async def get_research_status(self) -> dict[str, Any]:
         """Training Ground / Research Lab status: DB M1 bar coverage, active DL/ML champions, and last OOS audit."""

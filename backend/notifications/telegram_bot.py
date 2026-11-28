@@ -127,22 +127,28 @@ class TelegramControlBot:
             res = await self.orch.run_evolution_cycle()
             return f"Evolution Cycle Result: {res.get('status')}"
         if cmd == "/approve":
-            snap = self.orch.gate.promote_active_challenger(note="Approved via Telegram", current_equity=self.orch.account.equity)
+            cand = self.orch.gate.active_challenger
+            if cand is None:
+                return "No active Challenger awaiting promotion."
+            if cand.status != "PENDING_APPROVAL":
+                min_req = self.orch.config.evolution.shadow_min_trades
+                return f"Cannot promote {cand.version_id}: still {cand.status} ({cand.shadow_trades}/{min_req} shadow trades)."
+            snap = await self.orch.promote_active_challenger(note="Approved via Telegram")
             if snap:
-                self.orch.apply_active_config(self.orch.gate.active_config)
-                await self.orch.db.save_snapshot(snap)
-                return f"Promoted {snap.version_id} to Active Champion!"
+                return f"Promoted {snap.version_id} (config + DL/ML) to Active Champion!"
             return "No active Challenger awaiting promotion."
         if cmd == "/reject":
             ok = self.orch.gate.reject_active_challenger("Rejected via Telegram")
+            if ok:
+                self.orch.shadow_dl_net = None
+                self.orch.shadow_ml_labeler = None
             return "Challenger rejected." if ok else "No active Challenger to reject."
         if cmd == "/rollback":
             snaps = self.orch.gate.snapshots
             prev = next((s for s in snaps if s.status == "ARCHIVED"), None)
             if prev:
-                restored = self.orch.gate.rollback_to(prev.version_id)
+                restored = await self.orch.rollback_champion(prev.version_id, auto=False)
                 if restored:
-                    self.orch.apply_active_config(self.orch.gate.active_config)
-                    return f"Rolled back instantly to Champion {restored.version_id}."
+                    return f"Rolled back instantly to Champion {restored.version_id} (config + DL/ML)."
             return "No previous archived snapshot available for rollback."
         return "Commands: /status /positions /regime /evolve /approve /reject /rollback /pause /resume /kill /unkill"
