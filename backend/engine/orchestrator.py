@@ -236,6 +236,8 @@ class TradingOrchestrator:
         self.ws_clients: set[Any] = set()
         self.alert_callback: Any | None = None
         self.evolution_running: bool = False
+        self.research_running: bool = False
+        self.last_research_audit: dict[str, Any] | None = None
         self._warmup_triggered: bool = False
         self._brief_refreshing: bool = False
         self._bg_tasks: set[asyncio.Task] = set()
@@ -319,6 +321,7 @@ class TradingOrchestrator:
         dl_path = f"{self.config.app.snapshots_dir}/dl_champion.npz"
         self.dl_net.load(dl_path)
         self.ml_labeler.load(f"{self.config.app.snapshots_dir}/ml_champion.pkl")
+        self.last_research_audit = await self.db.get_kv("last_research_audit")
 
     def apply_active_config(self, cfg: TradingConfig) -> None:
         self.config = cfg
@@ -2071,6 +2074,170 @@ class TradingOrchestrator:
             }
         finally:
             self.evolution_running = False
+
+    async def get_research_status(self) -> dict[str, Any]:
+        """Training Ground / Research Lab status: DB M1 bar coverage, active DL/ML champions, and last OOS audit."""
+        raw_cov = await self.db.get_bar_coverage("M1")
+        target_bars = max(600, self.config.evolution.train_window_bars)
+        offset = self.server_offset_sec
+        coverage = []
+        seen: set[str] = set()
+        for row in raw_cov:
+            sym = str(row["symbol"])
+            seen.add(sym)
+            n_bars = int(row["bars"] or 0)
+            min_ts = int(row["min_ts"] or 0)
+            max_ts = int(row["max_ts"] or 0)
+            dur = round(max(0.0, (max_ts - min_ts) / 86400.0), 2) if n_bars > 1 else 0.0
+            from_utc = (
+                datetime.fromtimestamp(min_ts - offset, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                if min_ts
+                else "—"
+            )
+            to_utc = (
+                datetime.fromtimestamp(max_ts - offset, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                if max_ts
+                else "—"
+            )
+            coverage.append(
+                {
+                    "symbol": sym,
+                    "bars": n_bars,
+                    "from_utc": from_utc,
+                    "to_utc": to_utc,
+                    "duration_days": dur,
+                    "pct_of_window": round(min(100.0, (n_bars / target_bars) * 100.0), 1),
+                }
+            )
+        for sym in self.config.instruments.symbols:
+            if sym not in seen:
+                coverage.append(
+                    {
+                        "symbol": sym,
+                        "bars": 0,
+                        "from_utc": "—",
+                        "to_utc": "—",
+                        "duration_days": 0.0,
+                        "pct_of_window": 0.0,
+                    }
+                )
+        return {
+            "running": self.research_running or self.evolution_running,
+            "window_bars_default": target_bars,
+            "recency_half_life_days": self.config.evolution.recency_half_life_days,
+            "dl_min_oos_gain": self.config.evolution.dl_min_oos_gain,
+            "ml_min_oos_gain": self.config.evolution.ml_min_oos_gain,
+            "server_offset_sec": offset,
+            "coverage": coverage,
+            "dl_champion": {
+                "trained": self.dl_net.trained,
+                "val_acc": round(self.dl_net.last_val_accuracy, 4),
+            },
+            "ml_champion": self.ml_labeler.diagnostics(),
+            "last_audit": self.last_research_audit,
+        }
+
+    async def import_research_csv(self, filename: str, content: str) -> dict[str, Any]:
+        """Import an MT5 History Center CSV/TSV file into SQLite bars without triggering live entries."""
+        from backend.evolution.pretrain import parse_mt5_csv_text
+
+        parsed = await asyncio.to_thread(
+            parse_mt5_csv_text, filename, content, self.server_offset_sec
+        )
+        if not parsed.bars:
+            raise ValueError(f"No valid M1 OHLC bars found in '{filename}' (skipped {parsed.skipped_rows} rows)")
+        await self.db.save_bars(parsed.bars)
+        self.ensure_symbol(parsed.symbol)
+        # Refresh in-memory tail buffer cleanly (historical backfill only, zero live entries)
+        recent = await self.db.load_recent_bars(parsed.symbol, "M1", limit=BAR_BUFFER)
+        buf = self.bars.setdefault(parsed.symbol, deque(maxlen=BAR_BUFFER))
+        buf.clear()
+        buf.extend(recent)
+        await self._log_decision(
+            DecisionEvent(
+                symbol=parsed.symbol,
+                category="EVOLUTION",
+                tag="CSV IMPORT",
+                message=f"Imported {len(parsed.bars):,} M1 bars for {parsed.symbol} from {filename} (skipped {parsed.skipped_rows})",
+            )
+        )
+        return {
+            "ok": True,
+            "symbol": parsed.symbol,
+            "imported": len(parsed.bars),
+            "skipped": parsed.skipped_rows,
+        }
+
+    async def run_research_pretrain(
+        self,
+        *,
+        window_bars: int | None = None,
+        dry_run: bool = False,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Run offline DL (1D-CNN) + ML (Calibrated Meta-Labeler) backtest pre-training & Scientist OOS Audit."""
+        from backend.evolution.pretrain import run_pretrain_audit
+
+        if self.research_running or self.evolution_running:
+            return {"status": "already_running", "message": "Training or evolution cycle already in progress"}
+
+        self.research_running = True
+        try:
+            limit = max(300, int(window_bars or self.config.evolution.train_window_bars))
+            cov_rows = await self.db.get_bar_coverage("M1")
+            symbols = list(dict.fromkeys([*self.config.instruments.symbols, *(str(r["symbol"]) for r in cov_rows)]))
+            bars_map: dict[str, list[Bar]] = {}
+            for sym in symbols:
+                stored = await self.db.load_recent_bars(sym, "M1", limit=limit)
+                live = list(self.bars.get(sym, ()))
+                if live and stored and live[-1].timestamp > stored[-1].timestamp:
+                    stored += [b for b in live if b.timestamp > stored[-1].timestamp]
+                bars = stored if len(stored) >= len(live) else live
+                if len(bars) >= 120:
+                    bars_map[sym] = bars[-limit:]
+            if not bars_map:
+                return {
+                    "status": "insufficient_bars",
+                    "message": "Need at least 120 closed M1 bars in at least one symbol",
+                }
+
+            res = await asyncio.to_thread(
+                run_pretrain_audit,
+                bars_by_symbol=bars_map,
+                config=self.config,
+                specs=self.specs,
+                champion_dl=self.dl_net if self.dl_net.trained else None,
+                champion_ml=self.ml_labeler if self.ml_labeler.trained else None,
+                server_offset_sec=self.server_offset_sec,
+                window_bars=limit,
+                dry_run=dry_run,
+                force=force,
+                snapshots_dir=self.config.app.snapshots_dir,
+            )
+
+            if not dry_run:
+                if res.dl_saved and res.selected_dl is not None:
+                    self.dl_net = res.selected_dl
+                if res.ml_saved and res.selected_ml is not None:
+                    self.ml_labeler = res.selected_ml
+
+            self.last_research_audit = res.audit
+            await self.db.set_kv("last_research_audit", res.audit, utc_now_ms())
+            await self._log_decision(
+                DecisionEvent(
+                    symbol="RESEARCH",
+                    category="EVOLUTION",
+                    tag="TRAINING GROUND",
+                    message=(
+                        f"DL {res.audit['dl']['status']} ({res.audit['dl']['save_action']}) | "
+                        f"ML {res.audit['ml']['status']} ({res.audit['ml']['save_action']}) | "
+                        f"OOS PF {res.audit['oos_backtest']['profit_factor']:.2f} ({res.audit['oos_backtest']['total_trades']} trades)"
+                    ),
+                )
+            )
+            return {"status": "completed", "audit": res.audit}
+        finally:
+            self.research_running = False
 
     def entry_block_reason(self) -> str | None:
         """Final, non-tunable gate checked right before any OPEN command leaves for MT5."""
