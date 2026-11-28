@@ -49,6 +49,39 @@ class WFOResult:
     ml_decision: dict = field(default_factory=dict)
 
 
+def compute_timestamp_recency_weights(
+    timestamps: list[int] | np.ndarray,
+    half_life_days: float = 5.0,
+    min_weight: float = 0.20,
+) -> np.ndarray:
+    """Exponential time-decay weights from real Unix timestamps (mean-normalized to 1.0).
+
+    Recent bars/trades receive weight ~1.0 while older regimes decay gently toward ``min_weight``
+    so the models adapt to current volatility without forgetting older market regimes.
+    """
+    ts = np.asarray(timestamps, dtype=np.float64)
+    if len(ts) == 0:
+        return np.empty((0,), dtype=np.float64)
+    max_ts = float(np.max(ts))
+    age_days = np.maximum(0.0, (max_ts - ts) / 86400.0)
+    hl = max(float(half_life_days), 0.25)
+    raw = np.clip(np.power(0.5, age_days / hl), min_weight, 1.0)
+    mean_w = float(np.mean(raw))
+    return raw / mean_w if mean_w > 1e-12 else np.ones_like(raw)
+
+
+def _multiscale_indices(n: int, recent_keep: int = 2400, max_total: int = 3600) -> np.ndarray:
+    """Keep 100% of recent bars and evenly strided older history so 14-day CPU training stays fast."""
+    if n <= max_total:
+        return np.arange(n, dtype=np.int64)
+    recent_start = max(0, n - recent_keep)
+    older_budget = max(200, max_total - (n - recent_start))
+    older_idx = np.linspace(0, max(0, recent_start - 1), older_budget, dtype=np.int64)
+    older_idx = np.unique(older_idx)
+    recent_idx = np.arange(recent_start, n, dtype=np.int64)
+    return np.concatenate([older_idx, recent_idx])
+
+
 class PurgedWalkForwardOptimizer:
     """Purged & Embargoed Walk-Forward Retrainer for DL 1D-CNN, ML Meta-Labeler, and Strategy Params."""
 
@@ -87,43 +120,77 @@ class PurgedWalkForwardOptimizer:
         sym_specs = specs or DEFAULT_SPECS
         train_bars, oos_bars = self._split_bars_purged(bars_by_symbol)
 
-        # 1. DL 1D-CNN: continue from the champion's weights (warm start) on the Train split,
-        #    then keep whichever of champion / new has the lower loss on the unseen OOS split.
-        def dl_dataset(bmap: dict[str, list[Bar]]) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
-            xs_all, yd_all, yv_all = [], [], []
+        # 1. DL 1D-CNN: continue from the champion's weights (warm start) on the Train split with
+        #    per-symbol exponential time-decay weights (14-day multi-regime memory without forgetting),
+        #    then adopt only when OOS loss beats champion by at least ``dl_min_oos_gain``.
+        hl_days = champion_config.evolution.recency_half_life_days
+
+        def dl_dataset(
+            bmap: dict[str, list[Bar]], *, with_weights: bool = False
+        ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None] | None:
+            xs_all, yd_all, yv_all, ts_all = [], [], [], []
+            seq_len = champion_config.ai.dl_seq_len
+            horizon = 8
             for sym, b_list in bmap.items():
                 spec = sym_specs.get(sym, DEFAULT_SPECS["XAUUSD"])
-                xs, yds, yvs = build_dl_training_dataset(
-                    b_list, seq_len=champion_config.ai.dl_seq_len, horizon=8, point=spec.point
-                )
-                if len(xs) > 0:
-                    xs_all.append(xs)
-                    yd_all.append(yds)
-                    yv_all.append(yvs)
+                xs, yds, yvs = build_dl_training_dataset(b_list, seq_len=seq_len, horizon=horizon, point=spec.point)
+                if len(xs) == 0:
+                    continue
+                # Timestamps aligned with build_dl_training_dataset's end_idx = range(seq_len+16, len(bars)-horizon)
+                start_bar = seq_len + 16
+                bar_ts = np.array([b.timestamp for b in b_list[start_bar : start_bar + len(xs)]], dtype=np.int64)
+                if with_weights and len(xs) > 3600:
+                    keep = _multiscale_indices(len(xs), recent_keep=2400, max_total=3600)
+                    xs, yds, yvs, bar_ts = xs[keep], yds[keep], yvs[keep], bar_ts[keep]
+                xs_all.append(xs)
+                yd_all.append(yds)
+                yv_all.append(yvs)
+                ts_all.append(bar_ts)
             if not xs_all:
                 return None
-            return np.concatenate(xs_all, axis=0), np.concatenate(yd_all, axis=0), np.concatenate(yv_all, axis=0)
+            x_cat = np.concatenate(xs_all, axis=0)
+            yd_cat = np.concatenate(yd_all, axis=0)
+            yv_cat = np.concatenate(yv_all, axis=0)
+            if not with_weights:
+                return x_cat, yd_cat, yv_cat, None
+            # Sort globally by timestamp so chronological train/val split inside fit() never leaks across symbols!
+            ts_cat = np.concatenate(ts_all, axis=0)
+            order = np.argsort(ts_cat, kind="stable")
+            sw = compute_timestamp_recency_weights(ts_cat[order], half_life_days=hl_days)
+            return x_cat[order], yd_cat[order], yv_cat[order], sw
 
         warm = champion_dl is not None and champion_dl.trained
         dl_net = copy.deepcopy(champion_dl) if warm else SequenceConvNet(seed=int(self.rng.integers(1, 10000)))
         dl_summary = {"train_loss": 0.0, "val_loss": 0.0, "val_acc": 0.0}
-        tr_ds, oos_ds = dl_dataset(train_bars), dl_dataset(oos_bars)
+        tr_ds = dl_dataset(train_bars, with_weights=True)
+        oos_ds_full = dl_dataset(oos_bars, with_weights=False)
+        oos_ds = oos_ds_full[:3] if oos_ds_full is not None else None
         if tr_ds is not None and len(tr_ds[0]) >= 40:
             lr = champion_config.ai.dl_lr * (champion_config.evolution.dl_finetune_lr_mult if warm else 1.0)
-            dl_summary = dl_net.fit(*tr_ds, epochs=champion_config.ai.dl_epochs, lr=lr)
-        dl_net, dl_decision = _pick_dl(champion_dl, dl_net, oos_ds, warm)
+            dl_summary = dl_net.fit(tr_ds[0], tr_ds[1], tr_ds[2], epochs=champion_config.ai.dl_epochs, lr=lr, sample_weight=tr_ds[3])
+        dl_net, dl_decision = _pick_dl(
+            champion_dl, dl_net, oos_ds, warm, min_oos_gain=champion_config.evolution.dl_min_oos_gain
+        )
 
-        # 2. ML Meta-Labeler: trained on in-sample setups, kept only if its Brier score on
-        #    out-of-sample setups beats the champion's.
-        _, _, (mx, my) = self.backtester.run(
+        # 2. ML Meta-Labeler: trained on multi-day setups sorted chronologically with exponential
+        #    time-decay weights, adopted only if OOS Brier beats champion by ``ml_min_oos_gain``.
+        _, tr_trades, (mx, my) = self.backtester.run(
             train_bars, champion_config, specs=sym_specs, dl_net=dl_net, ml_labeler=None, collect_meta_samples=True
         )
+        ml_sw: np.ndarray | None = None
+        if len(mx) > 0 and len(tr_trades) == len(mx):
+            tr_ts = np.array([t.open_time for t in tr_trades], dtype=np.int64)
+            order_ml = np.argsort(tr_ts, kind="stable")
+            mx, my = mx[order_ml], my[order_ml]
+            ml_sw = compute_timestamp_recency_weights(tr_ts[order_ml], half_life_days=hl_days)
         new_ml = CalibratedMetaLabeler()
-        ml_summary = new_ml.fit_purged_walk_forward(mx, my)
+        ml_summary = new_ml.fit_purged_walk_forward(mx, my, sample_weight=ml_sw)
         _, _, (ox, oy) = self.backtester.run(
             oos_bars, champion_config, specs=sym_specs, dl_net=dl_net, ml_labeler=None, collect_meta_samples=True
         )
-        ml_labeler, ml_decision = _pick_ml(champion_ml, new_ml, ox, oy)
+        ml_labeler, ml_decision = _pick_ml(
+            champion_ml, new_ml, ox, oy, min_oos_gain=champion_config.evolution.ml_min_oos_gain
+        )
 
         # Strategy parameters are searched on the most recent part of the window only (much cheaper).
         if param_window_bars:
@@ -238,6 +305,8 @@ def _pick_dl(
     new: SequenceConvNet,
     oos: tuple[np.ndarray, np.ndarray, np.ndarray] | None,
     warm: bool,
+    *,
+    min_oos_gain: float = 0.005,
 ) -> tuple[SequenceConvNet, dict]:
     has_champ = champion is not None and champion.trained
     if not new.trained:
@@ -248,10 +317,11 @@ def _pick_dl(
     n = new.evaluate(*oos) if oos is not None else None
     if c is None or n is None:
         return champion, {"adopted": False, "reason": "no out-of-sample data to compare", "warm_start": warm}
-    better = n["loss"] < c["loss"]
+    gain = round(c["loss"] - n["loss"], 5)
+    better = gain >= min_oos_gain
     return (new if better else champion), {
         "adopted": better,
-        "reason": f"OOS loss {n['loss']:.4f} vs champion {c['loss']:.4f}",
+        "reason": f"OOS loss {n['loss']:.4f} vs champion {c['loss']:.4f} (gain {gain:+.4f}, min {min_oos_gain:.4f})",
         "warm_start": warm,
         "new": n,
         "champion": c,
@@ -259,7 +329,12 @@ def _pick_dl(
 
 
 def _pick_ml(
-    champion: CalibratedMetaLabeler | None, new: CalibratedMetaLabeler, ox: np.ndarray, oy: np.ndarray
+    champion: CalibratedMetaLabeler | None,
+    new: CalibratedMetaLabeler,
+    ox: np.ndarray,
+    oy: np.ndarray,
+    *,
+    min_oos_gain: float = 0.005,
 ) -> tuple[CalibratedMetaLabeler, dict]:
     has_champ = champion is not None and champion.trained
     if not new.trained:
@@ -274,10 +349,11 @@ def _pick_ml(
             "adopted": more,
             "reason": f"only {len(oy)} out-of-sample setups; trained on {new.n_samples} vs champion {champion.n_samples} setups",
         }
-    better = n < c
+    gain = round(c - n, 5)
+    better = gain >= min_oos_gain
     return (new if better else champion), {
         "adopted": better,
-        "reason": f"OOS Brier {n:.4f} vs champion {c:.4f} (lower is better)",
+        "reason": f"OOS Brier {n:.4f} vs champion {c:.4f} (gain {gain:+.4f}, min {min_oos_gain:.4f})",
         "new_brier": n,
         "champion_brier": c,
         "oos_setups": int(len(oy)),

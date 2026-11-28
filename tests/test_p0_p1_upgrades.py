@@ -686,3 +686,73 @@ async def test_openai_max_completion_tokens_and_cross_provider_chains():
     assert r_main.provider == "gemini" and r_main.model == "gemini-2.5-pro"
     assert r_fast.provider == "gemini" and r_fast.model == "gemini-3.5-flash-lite"
     assert called == ["openai:gpt-6-luna", "gemini:gemini-2.5-pro", "gemini:gemini-3.5-flash-lite"]
+
+
+def test_time_decay_weights_weighted_training_and_oos_margin():
+    import numpy as np
+    from backend.core.config import load_trading_config
+    from backend.evolution.meta_labeler import CalibratedMetaLabeler
+    from backend.evolution.optimizer import _pick_dl, _pick_ml, compute_timestamp_recency_weights
+    from backend.evolution.sequence_net import SequenceConvNet
+
+    # 1. Config defaults: 24h schedule, 14-day window, 5d half-life, 0.005 OOS margins
+    cfg = load_trading_config(local_path=None)
+    assert cfg.evolution.schedule_interval_minutes == 1440
+    assert cfg.evolution.train_window_bars == 20160
+    assert cfg.evolution.recency_half_life_days == 5.0
+    assert cfg.evolution.dl_min_oos_gain == 0.005
+    assert cfg.evolution.ml_min_oos_gain == 0.005
+
+    # 2. Time-decay weights: monotonic (newer > older), floored >= 0.20 (before mean norm), mean == 1.0
+    day = 86400
+    ts = [0, 5 * day, 10 * day, 14 * day]
+    w = compute_timestamp_recency_weights(ts, half_life_days=5.0, min_weight=0.20)
+    assert w[3] > w[2] > w[1] > w[0] > 0
+    assert abs(float(np.mean(w)) - 1.0) < 1e-9
+
+    # 3. Weighted training works cleanly for both 1D-CNN and CalibratedMetaLabeler
+    rng = np.random.default_rng(7)
+    x_seq = rng.normal(0, 1, size=(60, 32, 8))
+    y_dir = rng.integers(0, 3, size=(60,))
+    y_vol = rng.integers(0, 2, size=(60,)).astype(np.float64)
+    sw = compute_timestamp_recency_weights(np.arange(60) * 3600, half_life_days=2.0)
+    net = SequenceConvNet(seed=7)
+    summary = net.fit(x_seq, y_dir, y_vol, epochs=4, sample_weight=sw)
+    assert net.trained and summary["val_loss"] > 0
+
+    x_tab = rng.normal(0, 1, size=(80, 24))
+    y_tab = (x_tab[:, 0] > 0).astype(np.int64)
+    sw_tab = compute_timestamp_recency_weights(np.arange(80) * 3600, half_life_days=2.0)
+    ml = CalibratedMetaLabeler(random_state=7)
+    ml_sum = ml.fit_purged_walk_forward(x_tab, y_tab, sample_weight=sw_tab)
+    assert ml.trained and ml_sum["trained"] == 1.0
+
+    # 4. Anti-overfitting OOS margin blocks tiny noisy improvements (< 0.005)
+    class _StubDL:
+        trained = True
+
+        def __init__(self, loss: float) -> None:
+            self._loss = loss
+
+        def evaluate(self, *args):
+            return {"loss": self._loss, "acc": 0.55, "n": 100.0}
+
+    picked_noisy_dl, dec_noisy_dl = _pick_dl(_StubDL(1.000), _StubDL(0.998), (x_seq, y_dir, y_vol), warm=True, min_oos_gain=0.005)
+    assert not dec_noisy_dl["adopted"] and picked_noisy_dl._loss == 1.000
+    picked_real_dl, dec_real_dl = _pick_dl(_StubDL(1.000), _StubDL(0.990), (x_seq, y_dir, y_vol), warm=True, min_oos_gain=0.005)
+    assert dec_real_dl["adopted"] and picked_real_dl._loss == 0.990
+
+    class _StubML:
+        trained = True
+        n_samples = 200
+
+        def __init__(self, brier: float) -> None:
+            self._brier = brier
+
+        def score(self, ox, oy):
+            return self._brier
+
+    picked_noisy_ml, dec_noisy_ml = _pick_ml(_StubML(0.220), _StubML(0.218), x_tab, y_tab, min_oos_gain=0.005)
+    assert not dec_noisy_ml["adopted"] and picked_noisy_ml._brier == 0.220
+    picked_real_ml, dec_real_ml = _pick_ml(_StubML(0.220), _StubML(0.210), x_tab, y_tab, min_oos_gain=0.005)
+    assert dec_real_ml["adopted"] and picked_real_ml._brier == 0.210

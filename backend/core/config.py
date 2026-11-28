@@ -79,7 +79,7 @@ class AIConfig(BaseModel):
 
 
 class EvolutionConfig(BaseModel):
-    schedule_interval_minutes: int = 240
+    schedule_interval_minutes: int = 1440  # 24h retrain cadence (reduces multiple-testing selection bias)
     min_bars_for_wfo: int = 220
     oos_min_trades: int = 20
     oos_min_profit_factor: float = 1.20
@@ -90,10 +90,13 @@ class EvolutionConfig(BaseModel):
     rollback_live_dd_pct: float = 1.50
     rollback_min_trades: int = 8
     wfo_trials: int = 12
-    # The DL/ML models learn from this many recent M1 bars per symbol, read from the database
-    # (4320 = 3 days). Strategy parameters are searched on the most recent param_window_bars.
-    train_window_bars: int = 4320
+    # Expanding multi-regime window (up to 14 days = 20,160 M1 bars per symbol) with exponential recency decay.
+    train_window_bars: int = 20160
     param_window_bars: int = 600
+    recency_half_life_days: float = 5.0  # older regimes fade gently (floored at 0.20x) instead of being forgotten
+    # Minimum OOS improvement margin required before a newly trained model replaces the Champion.
+    dl_min_oos_gain: float = 0.005
+    ml_min_oos_gain: float = 0.005
     # The CNN continues from the champion's weights at this fraction of the normal learning rate.
     dl_finetune_lr_mult: float = 0.5
     auto_warmup_on_backfill: bool = True

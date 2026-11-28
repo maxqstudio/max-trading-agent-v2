@@ -57,6 +57,7 @@ class CalibratedMetaLabeler:
         x: np.ndarray,
         y: np.ndarray,
         embargo_bars: int = 5,
+        sample_weight: np.ndarray | None = None,
     ) -> dict[str, float]:
         """Train on chronological train split with embargo gap, calibrate probabilities, and evaluate on OOS split."""
         n = len(x)
@@ -66,10 +67,12 @@ class CalibratedMetaLabeler:
         split = max(16, int(n * 0.75))
         oos_start = min(n - 6, split + embargo_bars)
         x_tr, y_tr = x[:split], y[:split]
+        sw_tr = np.asarray(sample_weight[:split], dtype=np.float64) if sample_weight is not None else None
         x_oos, y_oos = x[oos_start:], y[oos_start:]
 
         if len(np.unique(y_tr)) < 2:
             x_tr, y_tr = x, y
+            sw_tr = np.asarray(sample_weight, dtype=np.float64) if sample_weight is not None else None
             x_oos, y_oos = x[-max(8, n // 4) :], y[-max(8, n // 4) :]
 
         base = HistGradientBoostingClassifier(
@@ -86,10 +89,10 @@ class CalibratedMetaLabeler:
         if len(x_tr) >= 40 and min_class >= 6:
             cv_folds = min(3, min_class)
             clf = CalibratedClassifierCV(base, method="sigmoid", cv=cv_folds)
-            clf.fit(x_tr, y_tr)
+            clf.fit(x_tr, y_tr, sample_weight=sw_tr)
             self.model = clf
         else:
-            base.fit(x_tr, y_tr)
+            base.fit(x_tr, y_tr, sample_weight=sw_tr)
             self.model = base
 
         self.trained = True
