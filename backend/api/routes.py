@@ -371,6 +371,9 @@ def create_app(orchestrator: TradingOrchestrator) -> FastAPI:
     from backend.api.research_routes import register_research_routes
 
     register_research_routes(api, orchestrator)
+    from backend.api.report_routes import register_report_routes
+
+    register_report_routes(api, orchestrator)
     app.include_router(public)
     app.include_router(bridge)
     app.include_router(api)
