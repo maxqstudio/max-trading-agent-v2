@@ -133,7 +133,11 @@ strategies:
     target: opposite           # or "middle"
 
 evolution:
-  schedule_interval_minutes: 240
+  schedule_interval_minutes: 1440
+  train_window_bars: 20160
+  recency_half_life_days: 5.0
+  dl_min_oos_gain: 0.005
+  ml_min_oos_gain: 0.005
   min_bars_for_wfo: 220
   oos_min_trades: 20
   oos_min_profit_factor: 1.20

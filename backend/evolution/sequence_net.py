@@ -139,27 +139,35 @@ class SequenceConvNet:
         x: np.ndarray,
         y_dir: np.ndarray,
         y_vol: np.ndarray,
+        sample_weight: np.ndarray | None = None,
     ) -> tuple[float, dict[str, np.ndarray]]:
         p = self.params
         bsz = x.shape[0]
         dir_probs, vol_prob, c = self._forward(x)
 
+        if sample_weight is not None:
+            w = np.asarray(sample_weight, dtype=np.float64)
+            w_sum = float(np.sum(w))
+            w = (w / w_sum) if w_sum > 1e-12 else np.full((bsz,), 1.0 / bsz, dtype=np.float64)
+        else:
+            w = np.full((bsz,), 1.0 / bsz, dtype=np.float64)
+
         eps = 1e-9
-        ce_loss = -float(np.mean(np.log(np.clip(dir_probs[np.arange(bsz), y_dir], eps, 1.0))))
-        bce_loss = -float(
-            np.mean(
-                y_vol * np.log(np.clip(vol_prob, eps, 1.0))
-                + (1.0 - y_vol) * np.log(np.clip(1.0 - vol_prob, eps, 1.0))
-            )
+        ce_vec = -np.log(np.clip(dir_probs[np.arange(bsz), y_dir], eps, 1.0))
+        bce_vec = -(
+            y_vol * np.log(np.clip(vol_prob, eps, 1.0))
+            + (1.0 - y_vol) * np.log(np.clip(1.0 - vol_prob, eps, 1.0))
         )
+        ce_loss = float(np.sum(w * ce_vec))
+        bce_loss = float(np.sum(w * bce_vec))
         total_loss = ce_loss + 0.35 * bce_loss
 
-        # Gradients from heads
+        # Weighted gradients from heads
         d_dir_logits = dir_probs.copy()
         d_dir_logits[np.arange(bsz), y_dir] -= 1.0
-        d_dir_logits /= bsz
+        d_dir_logits *= w[:, None]
 
-        d_vol_logit = (0.35 * (vol_prob - y_vol) / bsz)[:, None]
+        d_vol_logit = (0.35 * (vol_prob - y_vol) * w)[:, None]
 
         grads: dict[str, np.ndarray] = {}
         grads["w_dir"] = c["ad"].T @ d_dir_logits
@@ -201,6 +209,7 @@ class SequenceConvNet:
         lr: float = 0.008,
         weight_decay: float = 1e-3,
         val_ratio: float = 0.2,
+        sample_weight: np.ndarray | None = None,
     ) -> dict[str, float]:
         """Train with strict chronological train/val split (zero lookahead), AdamW, cosine LR & early stopping."""
         n = len(x)
@@ -211,6 +220,7 @@ class SequenceConvNet:
         split = max(20, int(n * (1.0 - val_ratio)))
         gap = min(4, max(0, n - split - 8))
         x_tr, yd_tr, yv_tr = x[:split], y_dir[:split], y_vol[:split]
+        sw_tr = np.asarray(sample_weight[:split], dtype=np.float64) if sample_weight is not None else None
         x_val, yd_val, yv_val = x[split + gap :], y_dir[split + gap :], y_vol[split + gap :]
         if len(x_val) < 5:
             x_val, yd_val, yv_val = x_tr[-10:], yd_tr[-10:], yv_tr[-10:]
@@ -239,7 +249,8 @@ class SequenceConvNet:
                 idx = perm[start : start + batch_size]
                 if len(idx) < 4:
                     continue
-                loss, grads = self._compute_loss_and_grads(x_tr[idx], yd_tr[idx], yv_tr[idx])
+                sw_batch = sw_tr[idx] if sw_tr is not None else None
+                loss, grads = self._compute_loss_and_grads(x_tr[idx], yd_tr[idx], yv_tr[idx], sample_weight=sw_batch)
                 ep_losses.append(loss)
                 step += 1
                 for k, g in grads.items():
